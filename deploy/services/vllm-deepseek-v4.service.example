@@ -1,0 +1,50 @@
+# EXAMPLE systemd unit for the vLLM DeepSeek V4 model server.
+# This file is NOT installable as-is: every __PLACEHOLDER__ is intentional so
+# the unit fails closed until you review it. Copy to
+# /etc/systemd/system/vllm-deepseek-v4.service and fill in your real venv and
+# model paths. The polkit rule must list the same unit name.
+#
+# SHARED LLM ENDPOINT IDENTITY (applies to all three model backends):
+#   The dashboard switches between exactly one LLM backend at a time, so all
+#   three bind the SAME loopback port and serve the SAME model name. External
+#   LLM clients therefore always use base URL http://127.0.0.1:8000/v1 and
+#   model name 'hal-current', no matter which backend is currently active
+#   (no proxy layer needed; the mutually exclusive services take turns on the
+#   port). config/systems.toml checks http://127.0.0.1:8000/health.
+#     - LLM_PORT: common loopback port, must be 8000.
+#     - vLLM required args: --host 127.0.0.1 --port $LLM_PORT
+#                           --served-model-name hal-current
+#   Never run two model services at once: the second bind on :8000 fails.
+#
+# This backend spans BOTH GPUs (CUDA_VISIBLE_DEVICES=0,1 with
+# --tensor-parallel-size 2) and conflicts with ComfyUI, which needs GPU 1.
+# Creative writing and highly parallel agentic workloads (lots of agents).
+
+[Unit]
+Description=vLLM - DeepSeek V4 (GPUs 0+1, creative writing + parallel agents)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__MODEL_USER__
+Group=__MODEL_GROUP__
+WorkingDirectory=/srv/vllm
+EnvironmentFile=/etc/hal-dashboard/vllm-deepseek-v4.env
+Environment=CUDA_VISIBLE_DEVICES=0,1
+# Shared LLM endpoint identity: every backend listens on 127.0.0.1:$LLM_PORT.
+Environment=LLM_PORT=8000
+
+# PLACEHOLDER (impossible on purpose): replace __VLLM_VENV__ with your real
+# vLLM virtualenv and __MODEL_PATH__ with your real model directory. The
+# served model name MUST stay 'hal-current' and the port MUST stay 8000 so
+# external clients are unaffected by model switches.
+ExecStart=__VLLM_VENV__/bin/vllm serve __MODEL_PATH__ --served-model-name hal-current --host 127.0.0.1 --port $LLM_PORT --tensor-parallel-size 2
+
+Restart=on-failure
+RestartSec=5
+# Model load takes roughly 150s per config/systems.toml; give stop plenty of time.
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

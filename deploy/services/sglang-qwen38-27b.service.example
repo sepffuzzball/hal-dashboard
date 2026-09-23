@@ -1,0 +1,52 @@
+# EXAMPLE systemd unit for the SGLang Qwen3.8 27B model server.
+# This file is NOT installable as-is: every __PLACEHOLDER__ is intentional so
+# the unit fails closed until you review it. Copy to
+# /etc/systemd/system/sglang-qwen38-27b.service and fill in your real venv
+# and model paths. The polkit rule must list the same unit name.
+#
+# SHARED LLM ENDPOINT IDENTITY (applies to all three model backends):
+#   The dashboard switches between exactly one LLM backend at a time, so all
+#   three bind the SAME loopback port and serve the SAME model name. External
+#   LLM clients therefore always use base URL http://127.0.0.1:8000/v1 and
+#   model name 'hal-current', no matter which backend is currently active
+#   (no proxy layer needed; the mutually exclusive services take turns on the
+#   port). config/systems.toml checks http://127.0.0.1:8000/health.
+#     - LLM_PORT: common loopback port, must be 8000.
+#     - SGLang required args: --host 127.0.0.1 --port $LLM_PORT
+#                             --served-model-name hal-current
+#   Never run two model services at once: the second bind on :8000 fails.
+#
+# Tensor-parallel 2 option (uses both GPUs): run with
+# --tensor-parallel-size 2, change CUDA_VISIBLE_DEVICES to "0,1", and update
+# 'gpus = [0, 1]' in config/systems.toml so the dashboard allocation matches
+# reality. The port and served model name stay the same.
+
+[Unit]
+Description=SGLang - Qwen3.8 27B (GPU 0 by default, agentic / fast small tasks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__MODEL_USER__
+Group=__MODEL_GROUP__
+WorkingDirectory=/srv/sglang
+EnvironmentFile=/etc/hal-dashboard/sglang-qwen38-27b.env
+Environment=CUDA_VISIBLE_DEVICES=0
+# Shared LLM endpoint identity: every backend listens on 127.0.0.1:$LLM_PORT.
+Environment=LLM_PORT=8000
+
+# PLACEHOLDER (impossible on purpose): replace __SGLANG_VENV__ with your real
+# SGLang virtualenv and __MODEL_PATH__ with your real model directory. The
+# served model name MUST stay 'hal-current' and the port MUST stay 8000 so
+# external clients are unaffected by model switches. For tensor-parallel 2,
+# append --tensor-parallel-size 2 (see the note above).
+ExecStart=__SGLANG_VENV__/bin/python -m sglang.launch_server --model-path __MODEL_PATH__ --served-model-name hal-current --host 127.0.0.1 --port $LLM_PORT
+
+Restart=on-failure
+RestartSec=5
+# Model load takes roughly 90s per config/systems.toml; give stop plenty of time.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

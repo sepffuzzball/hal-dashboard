@@ -1,0 +1,35 @@
+// Example polkit rule: let ONLY the unprivileged 'hal-dashboard' service user
+// start/stop EXACTLY the four configured units - nothing else.
+//
+// Install:
+//   sudo cp deploy/polkit/50-hal-dashboard.rules.example /etc/polkit-1/rules.d/50-hal-dashboard.rules
+//   # edit the unit list whenever config/systems.toml changes (see README)
+//   sudo systemctl restart polkit    (or rely on polkit's hot reload on Debian)
+//
+// Fail-closed notes:
+//   * The rule requires an explicit verb from the action details. If your
+//     systemd/polkit combination does not expose "verb" in action.lookup(),
+//     the indexOf check fails and the action is NOT allowed - customize and
+//     verify with: sudo -u hal-dashboard systemctl start comfyui.service
+//   * The rule matches subject.user exactly; no group-based grants.
+//   * Do not add "try-restart", "reload", or wildcards unless you have
+//     reviewed what the dashboard actually invokes (it only calls start/stop).
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        subject.isInGroup("hal-dashboard") &&
+        subject.user === "hal-dashboard") {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+        var allowed_units = [
+            "vllm-deepseek-v4.service",
+            "sglang-qwen38-flash-next.service",
+            "sglang-qwen38-27b.service",
+            "comfyui.service"
+        ];
+        var allowed_verbs = ["start", "stop"];
+        if (allowed_units.indexOf(unit) !== -1 &&
+            verb !== undefined && allowed_verbs.indexOf(verb) !== -1) {
+            return polkit.Result.YES;
+        }
+    }
+});

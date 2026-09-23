@@ -1,0 +1,30 @@
+# EXAMPLE systemd unit for ComfyUI.
+# This file is NOT installable as-is: every __PLACEHOLDER__ is intentional so
+# the unit fails closed until you review it. Copy to
+# /etc/systemd/system/comfyui.service and fill in your real paths. The polkit
+# rule must list the same unit name.
+
+[Unit]
+Description=ComfyUI (GPU 1, image generation)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__COMFY_USER__
+Group=__COMFY_GROUP__
+WorkingDirectory=/srv/comfyui
+Environment=CUDA_VISIBLE_DEVICES=1
+
+# PLACEHOLDER (impossible on purpose): replace __COMFY_VENV__ with your real
+# ComfyUI virtualenv. Keep the port aligned with the health_url configured for
+# the 'comfyui' service in config/systems.toml (default 8188). ComfyUI should
+# stay bound to the loopback interface unless you put it behind TLS.
+ExecStart=__COMFY_VENV__/bin/python main.py --listen 127.0.0.1 --port 8188
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+# HAL Dashboard systemd unit (EXAMPLE - customize before enabling)
+#
+# Install:
+#   sudo cp deploy/hal-dashboard.service /etc/systemd/system/hal-dashboard.service
+#   sudo systemctl daemon-reload
+#
+# This unit FAILS CLOSED out of the box: it requires the root-owned install
+# (venv at /opt/hal-dashboard/venv, env file, TOML below). A missing env file
+# or a missing/weak HAL_DASHBOARD_TOKEN aborts startup, so the service cannot
+# silently claim to work before setup.
+#
+# Prerequisites (see README.md):
+#   * a dedicated unprivileged user/group 'hal-dashboard'
+#   * /etc/hal-dashboard/hal-dashboard.env  (root:hal-dashboard, mode 0640)
+#   * /etc/hal-dashboard/systems.toml       (root:hal-dashboard, mode 0644)
+#   * a customized polkit rule for the managed units
+#     (deploy/polkit/50-hal-dashboard.rules.example)
+#   * the four managed systemd units installed and reviewed
+
+[Unit]
+Description=HAL Dashboard API (status + model orchestration)
+Documentation=file:/opt/hal-dashboard/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=hal-dashboard
+Group=hal-dashboard
+WorkingDirectory=/opt/hal-dashboard
+
+# Secrets and paths. The env file is root-owned and group-readable only.
+EnvironmentFile=/etc/hal-dashboard/hal-dashboard.env
+Environment=HAL_DASHBOARD_CONFIG=/etc/hal-dashboard/systems.toml
+
+# Concrete ExecStart for the documented root-owned install layout: the package
+# lives in a virtualenv at /opt/hal-dashboard/venv (root-owned, see README).
+# Keep EXACTLY ONE worker and NO --reload flag: the operation registry and the
+# probe cache live in process memory, and a second worker would split them and
+# break the single-flight mutation guarantee. The app still fails closed
+# without a strong HAL_DASHBOARD_TOKEN in the env file above.
+ExecStart=/opt/hal-dashboard/venv/bin/uvicorn hal_dashboard.main:app --host 127.0.0.1 --port 8787 --workers 1
+
+Restart=on-failure
+RestartSec=3
+
+# Modest hardening. The unit must still run systemctl (via polkit) and read
+# nvidia-smi/psutil state, so it cannot be fully sandboxed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

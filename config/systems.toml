@@ -1,0 +1,116 @@
+# HAL Dashboard systems configuration
+# ====================================
+# Schema (validated strictly at startup; unknown keys and impossible
+# combinations are rejected):
+#
+# [server]
+#   name, os          strings; server identity shown in the UI
+#   ram_gb            integer
+#   cpu_summary       optional string (free-form display text)
+#   gpu_summary       string (free-form display text)
+#
+# [ui]
+#   refresh_choices_seconds   non-empty list of unique integers, each within
+#                             the inclusive range 5..300 (seconds)
+#   default_refresh_seconds   integer within 5..300 that must appear in the
+#                             choices
+
+#
+# [[model]]   (at least one required)
+#   id                      unique lowercase id ([a-z][a-z0-9_-]*), unique across models+services
+#   display_name            string
+#   unit                    systemd unit name ending in .service, unique across models+services
+#   gpus                    list of unique non-negative GPU indexes (configured allocation)
+#   startup_eta_seconds     1..3600; expected model load time (used to bound verification)
+#   synopsis                short description for the UI
+#   strengths               optional list of non-empty strings
+#   conflicts_with          optional list of SERVICE ids; must be declared symmetrically
+#                           (the service must also list this model in its conflicts_with)
+#   comfyui_default         boolean; desired state of the 'comfyui' companion after a
+#                           switch to this model when the API caller omits the override
+#   allow_comfyui_override  boolean; whether the API may override comfyui_default
+#   health_url              optional plain http(s) URL checked in addition to systemd
+#   Impossibilities: a model that conflicts_with 'comfyui' must have
+#   comfyui_default=false and allow_comfyui_override=false.
+#
+# [[service]]   (auxiliary services, toggled via PUT /api/services/{id})
+#   id, display_name, unit, gpus, synopsis, conflicts_with, health_url
+#   (same id/unit/symmetry rules as models; conflicts_with lists MODEL ids)
+
+[server]
+name = "Hal"
+os = "Debian 13 (trixie) VM"
+ram_gb = 256
+cpu_summary = "VM vCPUs assigned by the hypervisor (see host)"
+gpu_summary = "2x NVIDIA RTX 6000 (96 GB each)"
+
+[ui]
+refresh_choices_seconds = [5, 15, 30, 60, 120, 300]
+default_refresh_seconds = 60
+
+# The three model backends are mutually exclusive and share one external LLM
+# identity: exactly one backend is running at a time, bound to
+# 127.0.0.1:8000 and serving the model name 'hal-current', so external LLM
+# clients keep a fixed base URL and model name across switches (no proxy).
+
+[[model]]
+id = "vllm-dsv4-flash-vision"
+display_name = "vLLM DSv4 Flash Vision Exp"
+unit = "vllm-deepseek-v4.service"
+gpus = [0, 1]
+startup_eta_seconds = 150
+synopsis = "Creative writing and agentic tasks with high parallelism (lots of agents), spanning both GPUs."
+strengths = [
+    "creative writing",
+    "agentic tasks",
+    "high parallelism: many concurrent agents",
+]
+conflicts_with = ["comfyui"]
+comfyui_default = false
+allow_comfyui_override = false
+health_url = "http://127.0.0.1:8000/health"
+
+[[model]]
+id = "sglang-qwen38-flash-next"
+display_name = "SGLang Qwen3.8 Flash Next"
+unit = "sglang-qwen38-flash-next.service"
+gpus = [0]
+startup_eta_seconds = 90
+synopsis = "Creative writing and basic agentic tasks on one GPU; ComfyUI stays available on GPU 1."
+strengths = [
+    "creative writing",
+    "basic agentic tasks",
+    "single GPU: ComfyUI available alongside",
+]
+conflicts_with = []
+comfyui_default = true
+allow_comfyui_override = true
+health_url = "http://127.0.0.1:8000/health"
+
+[[model]]
+id = "sglang-qwen38-27b"
+display_name = "SGLang Qwen3.8 27B"
+unit = "sglang-qwen38-27b.service"
+# Tensor-parallel 2 (gpus = [0, 1]) can be configured here if the SGLang unit
+# is started with --tensor-parallel-size 2.
+gpus = [0]
+startup_eta_seconds = 90
+synopsis = "Agentic tasks; very fast for lots of small tasks. One GPU by default; ComfyUI remains usable for basic tasks."
+strengths = [
+    "agentic tasks",
+    "very fast for lots of small tasks",
+    "ComfyUI remains usable for basic tasks",
+]
+conflicts_with = []
+comfyui_default = true
+allow_comfyui_override = true
+health_url = "http://127.0.0.1:8000/health"
+
+[[service]]
+id = "comfyui"
+display_name = "ComfyUI"
+unit = "comfyui.service"
+gpus = [1]
+synopsis = "Image, music, video, and 3D generation on GPU 1; pairs with the SGLang models on GPU 0."
+conflicts_with = ["vllm-dsv4-flash-vision"]
+health_url = "http://127.0.0.1:8188/"

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hal-dashboard"
+version = "0.1.0"
+description = "Local hardware/service status dashboard and LLM/ComfyUI systemd orchestrator"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "psutil>=5.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/sepffuzzball/hal-dashboard"
+Repository = "https://github.com/sepffuzzball/hal-dashboard"
+Issues = "https://github.com/sepffuzzball/hal-dashboard/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.4",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hal_dashboard = [
+    "static/index.html",
+    "static/styles.css",
+    "static/app.js",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
