@@ -44,7 +44,6 @@ _STOP_VERIFY_SECONDS = 30.0
 _AUX_COMMAND_SECONDS = 120.0
 _AUX_VERIFY_SECONDS = 60.0
 _POLL_INTERVAL_SECONDS = 0.2
-_MAX_START_COMMAND_SECONDS = 900.0
 
 
 class SystemctlLike(Protocol):
@@ -76,6 +75,16 @@ class Step:
 
 def _utcnow() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _monotonic() -> float:
+    """Monotonic clock source for all operation deadlines."""
+    return asyncio.get_running_loop().time()
+
+
+def _remaining(deadline: float) -> float:
+    """Seconds remaining before a monotonic deadline (never negative)."""
+    return max(0.0, deadline - _monotonic())
 
 
 @dataclass
@@ -114,17 +123,31 @@ class Operation:
     def active(self) -> bool:
         return self.status in {"queued", "running"}
 
+    @property
+    def target_model_id(self) -> str | None:
+        """Model id a switch operation targets, or None for non-switch kinds.
+
+        Derived from the safe ``params`` payload; never exposes raw params.
+        """
+        if self.kind == "switch":
+            model_id = self.params.get("model_id")
+            return str(model_id) if model_id is not None else None
+        return None
+
     def summary(self) -> dict[str, Any]:
-        return {
+        result = {
             "operation_id": self.id,
             "kind": self.kind,
             "status": self.status,
             "current_step": self.current_step,
             "status_url": f"/api/operations/{self.id}",
         }
+        if self.kind == "switch":
+            result["target_model_id"] = self.target_model_id
+        return result
 
     def public(self) -> dict[str, Any]:
-        return {
+        result = {
             "operation_id": self.id,
             "kind": self.kind,
             "status": self.status,
@@ -136,6 +159,9 @@ class Operation:
             "steps": [step.public() for step in self.steps],
             "services": self.services,
         }
+        if self.kind == "switch":
+            result["target_model_id"] = self.target_model_id
+        return result
 
 
 class BusyError(Exception):
@@ -267,28 +293,33 @@ async def _poll_state(
     ctx: AppContext, unit: str, *, expect: frozenset[str], budget_seconds: float
 ) -> str:
     state = "unknown"
-    deadline = asyncio.get_running_loop().time() + budget_seconds
+    deadline = _monotonic() + budget_seconds
     while True:
         state = await _unit_state(ctx, unit)
         if state in expect or state not in {"unknown", "activating", "deactivating"}:
             return state
-        if asyncio.get_running_loop().time() >= deadline:
+        if _monotonic() >= deadline:
             return state
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
 async def _start_and_verify_model(ctx: AppContext, model: ModelSpec) -> None:
-    command_timeout = min(model.startup_eta_seconds + 120, _MAX_START_COMMAND_SECONDS)
-    await ctx.systemctl.run("start", model.unit, timeout_seconds=command_timeout)
+    # One monotonic deadline bounds the whole start-and-verify sequence: the
+    # start command, the systemd-active verification, and the HTTP-health
+    # verification each get however much of the budget is still left. A
+    # Type=simple unit becomes systemd-active immediately, so nearly the full
+    # budget remains for HTTP-health readiness (never a short fixed window).
+    deadline = _monotonic() + model.startup_timeout_seconds
+    await ctx.systemctl.run("start", model.unit, timeout_seconds=_remaining(deadline))
     state = await _poll_state(
         ctx,
         model.unit,
         expect=frozenset({"active"}),
-        budget_seconds=model.startup_eta_seconds + 60,
+        budget_seconds=_remaining(deadline),
     )
     if state != "active":
         raise ServiceStepError("model service did not reach the active state")
-    await _verify_health(ctx, model.health_url, budget_seconds=60.0)
+    await _verify_health(ctx, model.health_url, budget_seconds=_remaining(deadline))
 
 
 async def _start_and_verify_service(ctx: AppContext, service: ServiceSpec) -> None:
@@ -304,14 +335,14 @@ async def _start_and_verify_service(ctx: AppContext, service: ServiceSpec) -> No
 async def _verify_health(ctx: AppContext, url: str | None, *, budget_seconds: float) -> None:
     if not url:
         return
-    deadline = asyncio.get_running_loop().time() + budget_seconds
+    deadline = _monotonic() + budget_seconds
     while True:
         result = await ctx.health.check(url)
         if result is True:
             return
         if result is False:
             raise ServiceStepError("health endpoint reported failure")
-        if asyncio.get_running_loop().time() >= deadline:
+        if _monotonic() >= deadline:
             raise ServiceStepError("health endpoint unreachable")
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
@@ -413,17 +444,18 @@ async def run_switch(ctx: AppContext, operation: Operation) -> str:
 
         operation.begin_step("start-model")
         if snapshot[model.unit] in _ACTIVE_STATES:
+            deadline = _monotonic() + model.startup_timeout_seconds
             state = await _poll_state(
                 ctx,
                 model.unit,
                 expect=frozenset({"active"}),
-                budget_seconds=model.startup_eta_seconds + 60,
+                budget_seconds=_remaining(deadline),
             )
             if state != "active":
                 raise ServiceStepError("model service did not reach the active state")
+            await _verify_health(ctx, model.health_url, budget_seconds=_remaining(deadline))
         else:
             await _start_and_verify_model(ctx, model)
-        await _verify_health(ctx, model.health_url, budget_seconds=60.0)
         operation.complete_step("start-model")
 
         operation.begin_step("companion-service")

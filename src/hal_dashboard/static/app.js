@@ -1,5 +1,6 @@
 "use strict";
 
+const BUILD_ID = "20260924-3";
 const TOKEN_KEY = "hal-dashboard-token";
 const MIN_REFRESH_SECONDS = 5;
 const MAX_REFRESH_SECONDS = 300;
@@ -29,6 +30,9 @@ const state = {
   elapsedTimer: null,
   operation: null,
   operationUrl: null,
+  operationFocusReturn: null,
+  operationFocusSet: false,
+  comfyControlMode: "auto",
   refreshing: false,
 };
 
@@ -40,7 +44,7 @@ function initialize() {
   const ids = [
     "server-name", "global-health", "last-contact", "lock-button", "notice", "main",
     "refresh-interval", "refresh-button", "refresh-meta", "cpu-card", "memory-card",
-    "storage-card", "gpu-cards", "server-specs", "operation-panel", "operation-status",
+    "storage-card", "gpu-cards", "server-specs", "operation-backdrop", "operation-panel", "operation-status",
     "operation-elapsed", "operation-message", "operation-steps", "operation-final",
     "dismiss-operation", "conflict-warning", "services-body", "model-list",
     "document-state", "token-dialog", "token-form", "token-input", "token-copy", "token-error",
@@ -52,9 +56,13 @@ function initialize() {
   el.tokenDialog.addEventListener("cancel", (event) => event.preventDefault());
   el.lockButton.addEventListener("click", lockConsole);
   el.refreshButton.addEventListener("click", () => refreshStatus(true));
+  // The operation-dismiss control is optional: an older cached index.html may
+  // not include it, so only bind and use it when it is present. This keeps a
+  // mixed cached-asset version from throwing during initialization.
+  if (el.dismissOperation) el.dismissOperation.addEventListener("click", dismissOperation);
   el.refreshInterval.addEventListener("change", changeRefreshInterval);
-  el.dismissOperation.addEventListener("click", dismissOperation);
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  document.addEventListener("keydown", handleOperationDialogKey);
   window.addEventListener("online", () => refreshStatus(true));
   window.addEventListener("offline", () => setGlobalHealth("Offline", "failed"));
 
@@ -377,31 +385,88 @@ function cell(label, text) {
 function serviceControls(spec, observed) {
   const wrapper = create("div");
   const controls = create("div", "service-controls");
+  const isComfy = spec.id === "comfyui";
+  const auto = isComfy ? create("button", "quiet-button", "Auto") : null;
   const on = create("button", "quiet-button", "On");
   const off = create("button", "quiet-button", "Off");
+  if (auto) auto.type = "button";
   on.type = off.type = "button";
   const conflict = activeConflictForService(spec);
   const busy = mutationBusy();
   const indeterminate = observed.state === "unknown" || observed.state === "deactivating";
-  on.disabled = busy || indeterminate || ACTIVE_STATES.has(observed.state) || Boolean(conflict);
-  off.disabled = busy || indeterminate || observed.state === "inactive" || observed.state === "failed";
-  on.addEventListener("click", () => setService(spec.id, true));
-  off.addEventListener("click", () => setService(spec.id, false));
-  controls.append(on, off);
+  on.disabled = busy || indeterminate || (!isComfy && ACTIVE_STATES.has(observed.state)) || Boolean(conflict);
+  off.disabled = busy || indeterminate || (!isComfy && (observed.state === "inactive" || observed.state === "failed"));
+  if (isComfy) {
+    auto.disabled = busy || indeterminate;
+    [auto, on, off].forEach((button) => button.setAttribute("aria-pressed", "false"));
+    const selected = state.comfyControlMode === "on" ? on : state.comfyControlMode === "off" ? off : auto;
+    selected.setAttribute("aria-pressed", "true");
+    auto.addEventListener("click", () => selectComfyAuto(observed));
+    on.addEventListener("click", () => setService(spec.id, true, "on"));
+    off.addEventListener("click", () => setService(spec.id, false, "off"));
+    controls.append(auto, on, off);
+  } else {
+    on.addEventListener("click", () => setService(spec.id, true));
+    off.addEventListener("click", () => setService(spec.id, false));
+    controls.append(on, off);
+  }
   wrapper.append(controls);
   let reason = "Choose an explicit desired state.";
-  if (busy) reason = "Unavailable while another operation is running.";
+  if (isComfy && state.comfyControlMode === "auto") {
+    const model = activeHealthyModel();
+    reason = model
+      ? `Auto follows the active inference system. ${model.display_name} policy: ${model.comfyui_default ? "On" : "Off"}.`
+      : "Auto follows the active inference system. It will apply on the next model switch.";
+    if (busy) reason += " A change is currently in progress.";
+  } else if (busy) reason = "Unavailable while another operation is running.";
   else if (conflict) reason = `On is blocked while ${conflict.display_name} is active.`;
-  else if (ACTIVE_STATES.has(observed.state)) reason = "Already on; only Off is available.";
-  else if (observed.state === "inactive" || observed.state === "failed") reason = "Already not running; only On is available.";
+  else if (!isComfy && ACTIVE_STATES.has(observed.state)) reason = "Already on; only Off is available.";
+  else if (!isComfy && (observed.state === "inactive" || observed.state === "failed")) reason = "Already not running; only On is available.";
+  else if (isComfy) reason = `${titleCase(state.comfyControlMode)} is selected. Auto follows the active inference system.`;
   else if (indeterminate) reason = "Control unavailable until a stable state can be observed.";
   wrapper.append(create("span", "control-reason", reason));
   return wrapper;
 }
 
+function activeHealthyModel() {
+  if (!state.config || !state.status) return null;
+  const services = (state.status.services && state.status.services.items) || [];
+  const observedById = new Map(services.map((item) => [item.id, item]));
+  return state.config.models.find((model) => {
+    const observed = observedById.get(model.id);
+    return observed && observed.state === "active" && observed.healthy === true;
+  }) || null;
+}
+
+function observedActiveState(observed) {
+  if (observed && ACTIVE_STATES.has(observed.state)) return true;
+  if (observed && (observed.state === "inactive" || observed.state === "failed")) return false;
+  return null;
+}
+
+function selectComfyAuto(observed) {
+  if (mutationBusy()) return;
+  state.comfyControlMode = "auto";
+  renderServices();
+  const model = activeHealthyModel();
+  if (!model) {
+    el.liveRegion.textContent = "ComfyUI Auto selected. It will apply on the next model switch.";
+    return;
+  }
+  const desired = Boolean(model.comfyui_default);
+  const active = observedActiveState(observed);
+  el.liveRegion.textContent = `ComfyUI Auto selected. ${model.display_name} policy is ${desired ? "On" : "Off"}.`;
+  if (active !== null && active !== desired) setService("comfyui", desired);
+}
+
 function activeConflictForService(service) {
   if (!state.status) return null;
-  const activeIds = new Set(state.status.active_model_ids || []);
+  const services = (state.status.services && state.status.services.items) || [];
+  const activeIds = new Set(
+    services
+      .filter((item) => item.kind === "model" && ACTIVE_STATES.has(item.state))
+      .map((item) => item.id)
+  );
   return state.config.models.find((model) => service.conflicts_with.includes(model.id) && activeIds.has(model.id)) || null;
 }
 
@@ -485,6 +550,7 @@ function moveModelFocus(modelId) {
 
 async function activateModel(model) {
   if (!model || mutationBusy()) return;
+  state.comfyControlMode = "auto";
   state.focusedModelId = model.id;
   state.submittingModelId = model.id;
   state.submittingMutation = true;
@@ -504,8 +570,9 @@ function renderConflictWarnings(conflict) {
   el.conflictWarning.hidden = false;
 }
 
-async function setService(serviceId, active) {
+async function setService(serviceId, active, comfyMode = null) {
   if (mutationBusy()) return;
+  if (serviceId === "comfyui" && comfyMode) state.comfyControlMode = comfyMode;
   state.submittingMutation = true;
   renderServices();
   renderModels();
@@ -588,7 +655,7 @@ async function pollOperation() {
 function renderOperation() {
   const operation = state.operation;
   if (!operation) return;
-  el.operationPanel.hidden = false;
+  showOperationOverlay();
   el.operationStatus.textContent = titleCase(operation.status || "unknown");
   el.operationStatus.className = `status-label status-${statusClass(operation.status)}`;
   const current = operation.current_step ? STEP_LABELS[operation.current_step] || humanize(operation.current_step) : null;
@@ -611,7 +678,7 @@ function renderOperation() {
     el.operationFinal.textContent = `Final observed states: ${summary}.`;
     if (TERMINAL_STATES.has(operation.status)) renderServices(operation.services);
   }
-  el.dismissOperation.hidden = !TERMINAL_STATES.has(operation.status);
+  if (el.dismissOperation) el.dismissOperation.hidden = !TERMINAL_STATES.has(operation.status);
   el.liveRegion.textContent = `${titleCase(operation.status)}. ${current || el.operationMessage.textContent}`;
   setMutationsDisabled(!TERMINAL_STATES.has(operation.status));
   startElapsedClock();
@@ -641,8 +708,59 @@ function updateElapsed() {
 function dismissOperation() {
   if (state.operation && !TERMINAL_STATES.has(state.operation.status)) return;
   state.operation = null;
-  el.operationPanel.hidden = true;
+  hideOperationOverlay(true);
   clearInterval(state.elapsedTimer);
+}
+
+function showOperationOverlay() {
+  if (el.operationPanel.hidden) {
+    const active = document.activeElement;
+    state.operationFocusReturn = active && active !== document.body ? active : null;
+    el.operationPanel.hidden = false;
+    // The backdrop is optional: an older cached index.html may not include it.
+    if (el.operationBackdrop) el.operationBackdrop.hidden = false;
+    document.body.classList.add("operation-overlay-active");
+    // Scroll the freshly shown panel to the top before moving focus into it.
+    el.operationPanel.scrollTop = 0;
+  }
+  if (!state.operationFocusSet) {
+    state.operationFocusSet = true;
+    window.requestAnimationFrame(() => el.operationPanel.focus({ preventScroll: true }));
+  }
+}
+
+function hideOperationOverlay(restoreFocus) {
+  el.operationPanel.hidden = true;
+  if (el.operationBackdrop) el.operationBackdrop.hidden = true;
+  document.body.classList.remove("operation-overlay-active");
+  state.operationFocusSet = false;
+  if (restoreFocus) {
+    let target = state.operationFocusReturn;
+    if (!target || !target.isConnected) {
+      target = Array.from(el.modelList.children).find((card) => card.dataset.modelId === state.focusedModelId) || el.refreshButton;
+    }
+    if (target && !target.hidden) target.focus({ preventScroll: true });
+  }
+  state.operationFocusReturn = null;
+}
+
+function handleOperationDialogKey(event) {
+  if (el.operationPanel.hidden || event.key !== "Tab") return;
+  const focusable = Array.from(el.operationPanel.querySelectorAll("button:not([disabled]):not([hidden])"));
+  if (!focusable.length) {
+    event.preventDefault();
+    el.operationPanel.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === el.operationPanel)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function mutationBusy() {
@@ -728,7 +846,7 @@ function lockConsole() {
   state.operation = null;
   el.main.hidden = true;
   el.lockButton.hidden = true;
-  el.operationPanel.hidden = true;
+  hideOperationOverlay(false);
   el.documentState.textContent = "Console locked";
   showNotice("", false);
   showTokenDialog("Console locked. Enter the token to begin a new tab session.");

@@ -297,6 +297,8 @@ def test_config_payload_is_sanitized(client: TestClient) -> None:
     # No filesystem paths, systemd units, or health URLs leak to the UI.
     for needle in (".service", "health_url", "/home", "systemctl", "http://127"):
         assert needle not in text, needle
+    # The internal startup_timeout_seconds orchestrator limit is not exposed.
+    assert "startup_timeout_seconds" not in text
     ids = [model["id"] for model in payload["models"]]
     assert ids == ["vllm-dsv4-flash-vision", "sglang-qwen38-flash-next", "sglang-qwen38-27b"]
     assert payload["server"]["name"] == "Hal"
@@ -308,6 +310,8 @@ def test_config_payload_is_sanitized(client: TestClient) -> None:
     assert vllm["gpus"] == [0, 1]
     assert vllm["allow_comfyui_override"] is False
     assert vllm["comfyui_default"] is False
+    assert vllm["startup_eta_min_seconds"] == 300
+    assert vllm["startup_eta_seconds"] == 420
     assert any(s["id"] == "comfyui" for s in payload["services"])
 
 
@@ -388,9 +392,11 @@ def test_switch_full_ordered_procedure(client: TestClient, ctl: FakeSystemctl) -
     assert response.status_code == 202
     body = response.json()
     assert body["status_url"] == f"/api/operations/{body['operation_id']}"
+    assert body["target_model_id"] == "sglang-qwen38-27b"
 
     operation = wait_operation(client, body["operation_id"])
     assert operation["status"] == "succeeded"
+    assert operation["target_model_id"] == "sglang-qwen38-27b"
     assert [step["status"] for step in operation["steps"]] == ["done", "done", "done", "done"]
     assert ("stop", VLLM) in ctl.calls
     assert ("start", B27) in ctl.calls
@@ -506,12 +512,16 @@ def test_busy_returns_409_with_active_operation_id(client: TestClient, ctl: Fake
     try:
         first = client.post("/api/switch", json={"model_id": "sglang-qwen38-27b"})
         assert first.status_code == 202
+        assert first.json()["target_model_id"] == "sglang-qwen38-27b"
         first_id = first.json()["operation_id"]
         second = client.post("/api/switch", json={"model_id": "sglang-qwen38-flash-next"})
         assert second.status_code == 409
         assert second.json()["active_operation_id"] == first_id
+        # The active operation is a switch, so a busy response carries its target.
+        assert second.json()["target_model_id"] == "sglang-qwen38-27b"
         blocked_put = client.put("/api/services/comfyui", json={"active": False})
         assert blocked_put.status_code == 409
+        assert blocked_put.json()["target_model_id"] == "sglang-qwen38-27b"
     finally:
         ctl.hold = False
     wait_operation(client, first_id)
@@ -551,8 +561,11 @@ def test_service_stop(client: TestClient, ctl: FakeSystemctl) -> None:
     ctl.states[COMFY] = "active"
     response = client.put("/api/services/comfyui", json={"active": False})
     assert response.status_code == 202
+    # Service operations never carry a switch target_model_id.
+    assert "target_model_id" not in response.json()
     operation = wait_operation(client, response.json()["operation_id"])
     assert operation["status"] == "succeeded"
+    assert "target_model_id" not in operation
     assert ctl.states[COMFY] == "inactive"
 
 
@@ -573,6 +586,7 @@ def test_status_exposes_active_operation(client: TestClient, ctl: FakeSystemctl)
         assert active["operation_id"] == operation_id
         assert active["status"] in {"queued", "running"}
         assert active["status_url"] == f"/api/operations/{operation_id}"
+        assert active["target_model_id"] == "sglang-qwen38-27b"
     finally:
         ctl.hold = False
 
@@ -598,7 +612,7 @@ def test_unknown_api_path_is_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-STATIC_FILES = ("index.html", "styles.css", "app.js")
+STATIC_FILES = ("index.html", "styles.css", "app.js", "favicon.svg")
 
 
 def test_static_frontend_is_packaged_and_served(client: TestClient) -> None:
@@ -622,13 +636,94 @@ def test_static_frontend_is_packaged_and_served(client: TestClient) -> None:
     index = client.get("/")
     assert index.status_code == 200
     assert "text/html" in index.headers["content-type"]
-    assert "review-dialog" in index.text
+    # The direct-switch model-routing section is the shipped interface marker.
+    assert 'id="model-list"' in index.text
+    assert "Switch inference system" in index.text
     app_js = client.get("/app.js")
     assert app_js.status_code == 200
     assert "hal-dashboard-token" in app_js.text
     styles = client.get("/styles.css")
     assert styles.status_code == 200
     assert "}" in styles.text
+
+
+def test_favicon_is_packaged_and_served(client: TestClient) -> None:
+    """The favicon ships in the wheel/sdist and is served with an SVG content
+    type and the expected body, including the versioned cache-busting query."""
+    # Packaging: pyproject declares the favicon as package data.
+    pyproject = tomllib.loads(
+        (Path(hal_dashboard.__file__).resolve().parents[2] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["hal_dashboard"]
+    assert "static/favicon.svg" in package_data
+
+    # The favicon exists next to the installed/imported package module.
+    static_dir = Path(hal_dashboard.__file__).resolve().parent / "static"
+    favicon_path = static_dir / "favicon.svg"
+    assert favicon_path.is_file()
+
+    response = client.get("/favicon.svg?v=20260924-3")
+    assert response.status_code == 200
+    assert "image/svg+xml" in response.headers["content-type"]
+    body = response.text
+    assert body.lstrip().startswith("<svg")
+    assert '<title id="title">HAL red lens</title>' in body
+
+
+def test_frontend_responses_are_not_stored(client: TestClient) -> None:
+    """Static/HTML responses are never stored; versioned assets stay busted."""
+    for path in (
+        "/",
+        "/app.js",
+        "/styles.css",
+        "/favicon.svg",
+        "/app.js?v=20260924-3",
+        "/styles.css?v=20260924-3",
+        "/favicon.svg?v=20260924-3",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200
+        cache_control = response.headers["cache-control"]
+        assert "no-store" in cache_control
+        assert "max-age=0" in cache_control
+        assert "no-cache" not in cache_control
+        assert response.headers["pragma"] == "no-cache"
+        assert response.headers["expires"] == "0"
+        # Security headers are preserved on frontend responses too.
+        assert response.headers["content-security-policy"].startswith("default-src 'self'")
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+
+    # The served HTML references versioned asset URLs and a build marker.
+    index = client.get("/")
+    assert 'href="/favicon.svg?v=20260924-3"' in index.text
+    assert 'href="/styles.css?v=20260924-3"' in index.text
+    assert 'src="/app.js?v=20260924-3"' in index.text
+    assert '<meta name="hal-dashboard-build" content="20260924-3">' in index.text
+
+    # The versioned app.js carries the build id and the guarded dismiss listener.
+    app_js = client.get("/app.js?v=20260924-3")
+    assert 'const BUILD_ID = "20260924-3";' in app_js.text
+    assert "if (el.dismissOperation) el.dismissOperation.addEventListener(" in app_js.text
+    assert "el.dismissOperation.addEventListener(" in app_js.text
+
+
+def test_api_responses_remain_no_store(client: TestClient, anon_client: TestClient) -> None:
+    """API responses (including errors) stay no-store, never no-cache."""
+    samples = [
+        client.get("/api/config"),
+        client.get("/api/health"),
+        client.get("/api/status"),
+        client.get("/api/operations/does-not-exist"),
+        anon_client.get("/api/status"),  # 401, still decorated
+    ]
+    for response in samples:
+        cache_control = response.headers["cache-control"]
+        assert "no-store" in cache_control
+        assert "no-cache" not in cache_control
 
 
 # ---------------------------------------------------------------------------

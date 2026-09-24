@@ -37,6 +37,7 @@ hal_dashboard = [
     "static/index.html",
     "static/styles.css",
     "static/app.js",
+    "static/favicon.svg",
 ]
 
 [tool.pytest.ini_options]

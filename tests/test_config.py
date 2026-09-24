@@ -34,7 +34,9 @@ def test_repo_config_loads_and_matches_required_entries() -> None:
     assert vllm.display_name == "vLLM DSv4 Flash Vision Exp"
     assert vllm.unit == "vllm-deepseek-v4.service"
     assert vllm.gpus == (0, 1)
-    assert 140 <= vllm.startup_eta_seconds <= 160
+    assert vllm.startup_eta_min_seconds == 300
+    assert vllm.startup_eta_seconds == 420
+    assert vllm.startup_timeout_seconds == 900
     assert vllm.strengths  # user-provided strengths present
     assert "creative writing" in vllm.synopsis.lower()
     assert vllm.conflicts_with == ("comfyui",)
@@ -46,7 +48,9 @@ def test_repo_config_loads_and_matches_required_entries() -> None:
     assert flash.display_name == "SGLang Qwen3.8 Flash Next"
     assert flash.unit == "sglang-qwen38-flash-next.service"
     assert flash.gpus == (0,)
-    assert 80 <= flash.startup_eta_seconds <= 100
+    assert flash.startup_eta_min_seconds == 180
+    assert flash.startup_eta_seconds == 360
+    assert flash.startup_timeout_seconds == 900
     assert "comfyui" in flash.synopsis.lower()
     assert flash.comfyui_default is True
 
@@ -55,7 +59,9 @@ def test_repo_config_loads_and_matches_required_entries() -> None:
     assert q27.display_name == "SGLang Qwen3.8 27B"
     assert q27.unit == "sglang-qwen38-27b.service"
     assert q27.gpus == (0,)
-    assert 80 <= q27.startup_eta_seconds <= 100
+    assert q27.startup_eta_min_seconds == 120
+    assert q27.startup_eta_seconds == 180
+    assert q27.startup_timeout_seconds == 900
     assert q27.comfyui_default is True
 
     comfy = config.service_by_id("comfyui")
@@ -206,6 +212,101 @@ def test_health_url_must_be_http() -> None:
     )
     with pytest.raises(ConfigError, match="health_url"):
         validate_config(doc)
+
+
+def test_startup_eta_min_is_required() -> None:
+    doc = patched(
+        "startup_eta_min_seconds = 300\nstartup_eta_seconds = 420",
+        "startup_eta_seconds = 420",
+    )
+    with pytest.raises(ConfigError, match="startup_eta_min_seconds"):
+        validate_config(doc)
+
+
+def test_startup_eta_min_exceeding_max_rejected() -> None:
+    doc = patched(
+        "startup_eta_min_seconds = 300\nstartup_eta_seconds = 420",
+        "startup_eta_min_seconds = 421\nstartup_eta_seconds = 420",
+    )
+    with pytest.raises(ConfigError, match="must not exceed"):
+        validate_config(doc)
+
+
+@pytest.mark.parametrize("value", [0, 3601, -5])
+def test_startup_eta_min_outside_1_to_3600_rejected(value: int) -> None:
+    doc = patched(
+        "startup_eta_min_seconds = 300\nstartup_eta_seconds = 420",
+        f"startup_eta_min_seconds = {value}\nstartup_eta_seconds = 420",
+    )
+    with pytest.raises(ConfigError, match="between 1 and 3600"):
+        validate_config(doc)
+
+
+@pytest.mark.parametrize("value", [0, 3601, -5])
+def test_startup_eta_max_outside_1_to_3600_rejected(value: int) -> None:
+    doc = patched(
+        "startup_eta_min_seconds = 300\nstartup_eta_seconds = 420",
+        f"startup_eta_min_seconds = 300\nstartup_eta_seconds = {value}",
+    )
+    with pytest.raises(ConfigError, match="between 1 and 3600"):
+        validate_config(doc)
+
+
+def test_startup_eta_min_equal_max_accepted() -> None:
+    doc = patched(
+        "startup_eta_min_seconds = 300\nstartup_eta_seconds = 420",
+        "startup_eta_min_seconds = 420\nstartup_eta_seconds = 420",
+    )
+    config = validate_config(doc)
+    vllm = config.model_by_id("vllm-dsv4-flash-vision")
+    assert vllm is not None
+    assert vllm.startup_eta_min_seconds == 420
+    assert vllm.startup_eta_seconds == 420
+
+
+def test_startup_timeout_seconds_is_required() -> None:
+    doc = patched(
+        "startup_eta_seconds = 420\nstartup_timeout_seconds = 900",
+        "startup_eta_seconds = 420",
+    )
+    with pytest.raises(ConfigError, match="startup_timeout_seconds"):
+        validate_config(doc)
+
+
+def test_startup_timeout_below_max_eta_rejected() -> None:
+    doc = patched(
+        "startup_eta_seconds = 420\nstartup_timeout_seconds = 900",
+        "startup_eta_seconds = 420\nstartup_timeout_seconds = 100",
+    )
+    with pytest.raises(ConfigError, match="must be at least"):
+        validate_config(doc)
+
+
+@pytest.mark.parametrize("value", [0, 1801, -5])
+def test_startup_timeout_outside_1_to_1800_rejected(value: int) -> None:
+    doc = patched(
+        "startup_eta_seconds = 420\nstartup_timeout_seconds = 900",
+        f"startup_eta_seconds = 420\nstartup_timeout_seconds = {value}",
+    )
+    with pytest.raises(ConfigError, match="between 1 and 1800"):
+        validate_config(doc)
+
+
+def test_startup_timeout_equal_max_eta_accepted() -> None:
+    doc = patched(
+        "startup_eta_seconds = 420\nstartup_timeout_seconds = 900",
+        "startup_eta_seconds = 420\nstartup_timeout_seconds = 420",
+    )
+    config = validate_config(doc)
+    vllm = config.model_by_id("vllm-dsv4-flash-vision")
+    assert vllm is not None
+    assert vllm.startup_timeout_seconds == 420
+
+
+def test_startup_timeout_900_accepted() -> None:
+    config = validate_config(parse(REPO_TOML))
+    for model in config.models:
+        assert model.startup_timeout_seconds == 900
 
 
 def test_missing_file_raises_config_error(tmp_path: Path) -> None:

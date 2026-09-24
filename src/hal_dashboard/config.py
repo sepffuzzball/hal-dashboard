@@ -41,7 +41,9 @@ _MODEL_KEYS = {
     "display_name",
     "unit",
     "gpus",
+    "startup_eta_min_seconds",
     "startup_eta_seconds",
+    "startup_timeout_seconds",
     "synopsis",
     "strengths",
     "conflicts_with",
@@ -85,7 +87,9 @@ class ModelSpec:
     display_name: str
     unit: str
     gpus: tuple[int, ...]
+    startup_eta_min_seconds: int
     startup_eta_seconds: int
+    startup_timeout_seconds: int
     synopsis: str
     strengths: tuple[str, ...]
     conflicts_with: tuple[str, ...]
@@ -354,7 +358,23 @@ def _parse_models(value: Any, errors: list[str]) -> tuple[ModelSpec, ...]:
         display_name = _require_str(table, "display_name", where, errors)
         unit = _unit(table, where, errors)
         gpus = _gpus(table, where, errors)
+        eta_min = _require_int(
+            table, "startup_eta_min_seconds", where, errors, minimum=1, maximum=3600
+        )
         eta = _require_int(table, "startup_eta_seconds", where, errors, minimum=1, maximum=3600)
+        if eta_min > eta:
+            errors.append(
+                f"{where}: 'startup_eta_min_seconds' ({eta_min}) must not exceed"
+                f" 'startup_eta_seconds' ({eta})"
+            )
+        timeout = _require_int(
+            table, "startup_timeout_seconds", where, errors, minimum=1, maximum=1800
+        )
+        if timeout < eta:
+            errors.append(
+                f"{where}: 'startup_timeout_seconds' ({timeout}) must be at least"
+                f" 'startup_eta_seconds' ({eta})"
+            )
         synopsis = _require_str(table, "synopsis", where, errors)
         strengths = _require_str_list(table, "strengths", where, errors)
         conflicts = _conflicts(table, where, errors)
@@ -367,7 +387,9 @@ def _parse_models(value: Any, errors: list[str]) -> tuple[ModelSpec, ...]:
                 display_name=display_name,
                 unit=unit,
                 gpus=gpus,
+                startup_eta_min_seconds=eta_min,
                 startup_eta_seconds=eta,
+                startup_timeout_seconds=timeout,
                 synopsis=synopsis,
                 strengths=strengths,
                 conflicts_with=conflicts,

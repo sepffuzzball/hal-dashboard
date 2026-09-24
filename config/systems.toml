@@ -21,7 +21,17 @@
 #   display_name            string
 #   unit                    systemd unit name ending in .service, unique across models+services
 #   gpus                    list of unique non-negative GPU indexes (configured allocation)
-#   startup_eta_seconds     1..3600; expected model load time (used to bound verification)
+#   startup_eta_min_seconds 1..3600; lower bound of the expected model load time
+#                           window (the fastest observed load, used by the UI)
+#   startup_eta_seconds     1..3600; upper bound of the expected model load time
+#                           window (must be >= startup_eta_min_seconds; the high
+#                           end of the window shown to the UI)
+#   startup_timeout_seconds 1..1800; internal orchestration limit for the whole
+#                           start-and-verify sequence (start command, systemd
+#                           active, HTTP health) for this model, bounded by a
+#                           single monotonic deadline. Must be >=
+#                           startup_eta_seconds. Internal only: never exposed
+#                           via /api/config.
 #   synopsis                short description for the UI
 #   strengths               optional list of non-empty strings
 #   conflicts_with          optional list of SERVICE ids; must be declared symmetrically
@@ -58,7 +68,9 @@ id = "vllm-dsv4-flash-vision"
 display_name = "vLLM DSv4 Flash Vision Exp"
 unit = "vllm-deepseek-v4.service"
 gpus = [0, 1]
-startup_eta_seconds = 150
+startup_eta_min_seconds = 300
+startup_eta_seconds = 420
+startup_timeout_seconds = 900
 synopsis = "Creative writing and agentic tasks with high parallelism (lots of agents), spanning both GPUs."
 strengths = [
     "creative writing",
@@ -75,7 +87,9 @@ id = "sglang-qwen38-flash-next"
 display_name = "SGLang Qwen3.8 Flash Next"
 unit = "sglang-qwen38-flash-next.service"
 gpus = [0]
-startup_eta_seconds = 90
+startup_eta_min_seconds = 180
+startup_eta_seconds = 360
+startup_timeout_seconds = 900
 synopsis = "Creative writing and basic agentic tasks on one GPU; ComfyUI stays available on GPU 1."
 strengths = [
     "creative writing",
@@ -94,7 +108,9 @@ unit = "sglang-qwen38-27b.service"
 # Tensor-parallel 2 (gpus = [0, 1]) can be configured here if the SGLang unit
 # is started with --tensor-parallel-size 2.
 gpus = [0]
-startup_eta_seconds = 90
+startup_eta_min_seconds = 120
+startup_eta_seconds = 180
+startup_timeout_seconds = 900
 synopsis = "Agentic tasks; very fast for lots of small tasks. One GPU by default; ComfyUI remains usable for basic tasks."
 strengths = [
     "agentic tasks",

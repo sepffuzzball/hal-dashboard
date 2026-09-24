@@ -90,6 +90,17 @@ enforced at startup (`ConfigError` on violation):
   ComfyUI state after a switch when the caller omits the override) and
   `allow_comfyui_override`; combos that are impossible (`comfyui_default =
   true` or override while conflicting with `comfyui`) are rejected
+- model load windows: every model must declare `startup_eta_min_seconds` and
+  `startup_eta_seconds`, both integers in the inclusive range 1..3600 with
+  `startup_eta_min_seconds <= startup_eta_seconds`. The minimum is the low end
+  of the window shown to the UI; the maximum is the high end. Every model must
+  also declare `startup_timeout_seconds` (integer 1..1800, >=
+  `startup_eta_seconds`): the internal orchestration limit that one monotonic
+  deadline imposes on the whole start-and-verify sequence (start command,
+  systemd-active verification, HTTP-health verification). A Type=simple unit
+  becomes systemd-active immediately, so a selected model may use nearly all of
+  the budget to become HTTP-healthy rather than a short fixed window. It is an
+  internal limit and is never exposed to the frontend
 - `health_url` (optional, plain http(s)) supplements systemd state with an
   HTTP liveness check; it is never exposed to the frontend
 - unknown keys are rejected everywhere
@@ -109,13 +120,15 @@ modes. CORS is not enabled. Responses carry CSP / `X-Frame-Options: DENY` /
 | --- | --- | --- |
 | GET | `/api/health` | public liveness: `{"status":"ok"}` |
 | GET | `/api/auth-mode` | public probe: `{"token_required": true\|false}` (never exposes the token) |
-| GET | `/api/config` | sanitized UI config (server info, refresh choices, model/service metadata, capabilities including `token_required`; no paths/units/commands/health URLs) |
+| GET | `/api/config` | sanitized UI config (server info, refresh choices, model/service metadata incl. each model's `startup_eta_min_seconds`/`startup_eta_seconds` load window, capabilities including `token_required`; no paths/units/commands/health URLs, and the internal `startup_timeout_seconds` orchestrator limit is intentionally not exposed) |
 | GET | `/api/status` | CPU/RAM/root-disk, per-GPU metrics, service states, active models, conflict warning, active operation; unavailable values are `null` + reason |
-| POST | `/api/switch` | `{"model_id": str, "comfyui": bool|null}` → `202 {"operation_id","status_url"}`; validates before touching anything; already-desired topology is a successful no-op |
-| PUT | `/api/services/{id}` | `{"active": bool}` for configured auxiliary services only (models go through `/api/switch`); same `202` shape; ComfyUI activation returns `409` while a conflicting model is active |
-| GET | `/api/operations/{id}` | queued/running/succeeded/failed, timestamps, current step, sanitized message, step list, final observed states; `404` for unknown ids; the latest 50 operations are kept in memory |
+| POST | `/api/switch` | `{"model_id": str, "comfyui": bool|null}` → `202 {"operation_id","status_url","target_model_id"}`; validates before touching anything; already-desired topology is a successful no-op |
+| PUT | `/api/services/{id}` | `{"active": bool}` for configured auxiliary services only (models go through `/api/switch`); same `202` shape (without `target_model_id`); ComfyUI activation returns `409` while a conflicting model is active |
+| GET | `/api/operations/{id}` | queued/running/succeeded/failed, timestamps, current step, sanitized message, step list, final observed states; switch operations also carry `target_model_id`; `404` for unknown ids; the latest 50 operations are kept in memory |
 
-A concurrent mutation returns `409` with `active_operation_id`. Switch order:
+A concurrent mutation returns `409` with `active_operation_id`, plus
+`target_model_id` when the already-running operation is a switch (same for the
+`active_operation` object on `GET /api/status`). Switch order:
 snapshot → stop every other model unit and incompatible auxiliary that is not
 positively stopped (`inactive`/`failed`; transitional or `unknown` states are
 stopped and verified too) → start the selected model (verified active and, if

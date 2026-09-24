@@ -44,6 +44,7 @@ from hal_dashboard.operations import (
     SWITCH_STEPS,
     AppContext,
     BusyError,
+    Operation,
     OperationManager,
     run_service_toggle,
     run_switch,
@@ -145,8 +146,18 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         if request.url.path.startswith("/api"):
+            # API responses (including errors) are never stored.
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
+        else:
+            # Frontend/static responses (including FileResponse) are never
+            # stored. This is intentionally stronger than plain no-cache: the
+            # browser must not reuse (or an intermediary must not serve) a stale
+            # asset between deployments. Versioned asset URLs are the matching
+            # cache-busting mechanism, but no-store guarantees no stale reuse.
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
 
     @app.middleware("http")
     async def guard(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -193,6 +204,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     "synopsis": model.synopsis,
                     "strengths": list(model.strengths),
                     "gpus": list(model.gpus),
+                    "startup_eta_min_seconds": model.startup_eta_min_seconds,
                     "startup_eta_seconds": model.startup_eta_seconds,
                     "conflicts_with": list(model.conflicts_with),
                     "comfyui_default": model.comfyui_default,
@@ -287,18 +299,23 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     # Mutations
     # ------------------------------------------------------------------ #
     def _busy_response(exc: BusyError) -> JSONResponse:
-        return _json_error(
-            409,
-            "another operation is already running",
-            active_operation_id=exc.operation_id,
-            status_url=f"/api/operations/{exc.operation_id}",
-        )
+        content: dict[str, Any] = {
+            "active_operation_id": exc.operation_id,
+            "status_url": f"/api/operations/{exc.operation_id}",
+        }
+        active = ctx.manager.get(exc.operation_id)
+        if active is not None and active.kind == "switch":
+            content["target_model_id"] = active.target_model_id
+        return _json_error(409, "another operation is already running", **content)
 
-    def _accepted(operation_id: str) -> JSONResponse:
-        return JSONResponse(
-            status_code=202,
-            content={"operation_id": operation_id, "status_url": f"/api/operations/{operation_id}"},
-        )
+    def _accepted(operation: Operation) -> JSONResponse:
+        content: dict[str, Any] = {
+            "operation_id": operation.id,
+            "status_url": f"/api/operations/{operation.id}",
+        }
+        if operation.kind == "switch":
+            content["target_model_id"] = operation.target_model_id
+        return JSONResponse(status_code=202, content=content)
 
     @app.post("/api/switch")
     async def switch(request: Request) -> JSONResponse:
@@ -325,7 +342,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             )
         except BusyError as exc:
             return _busy_response(exc)
-        return _accepted(operation.id)
+        return _accepted(operation)
 
     @app.put("/api/services/{service_id}")
     async def set_service(service_id: str, request: Request) -> JSONResponse:
@@ -366,7 +383,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             )
         except BusyError as exc:
             return _busy_response(exc)
-        return _accepted(operation.id)
+        return _accepted(operation)
 
     @app.get("/api/operations/{operation_id}")
     async def get_operation(operation_id: str) -> JSONResponse:
