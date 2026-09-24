@@ -92,6 +92,126 @@ def test_invalid_config_file_is_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Authentication modes (token default vs. reverse-proxy opt-in)
+# ---------------------------------------------------------------------------
+
+
+def _build(monkeypatch: pytest.MonkeyPatch, ctl: FakeSystemctl, health: FakeHealth):
+    """Fresh app with fakes wired (the auth-mode flag is whatever the test set)."""
+    application = create_app(CONFIG_PATH)
+    ctx = application.state.ctx
+    ctx.systemctl = ctl
+    ctx.health = health
+    ctx.probes = DynamicProbes(ctx.config, ctl, health)
+    return application
+
+
+def test_auth_mode_is_public_and_minimal(anon_client: TestClient) -> None:
+    response = anon_client.get("/api/auth-mode")
+    assert response.status_code == 200
+    # Exact, minimal body: only the boolean, no token, nothing else.
+    assert response.json() == {"token_required": True}
+
+
+def test_only_health_and_auth_mode_are_public(anon_client: TestClient) -> None:
+    assert anon_client.get("/api/health").status_code == 200
+    assert anon_client.get("/api/auth-mode").status_code == 200
+    assert anon_client.get("/api/health").json() == {"status": "ok"}
+    for path in ("/api/config", "/api/status", "/api/operations/whatever"):
+        assert anon_client.get(path).status_code == 401
+    assert anon_client.post("/api/switch", json={"model_id": "x"}).status_code == 401
+    assert anon_client.put("/api/services/comfyui", json={"active": True}).status_code == 401
+
+
+def test_default_auth_mode_capabilities(client: TestClient) -> None:
+    caps = client.get("/api/config").json()["capabilities"]
+    assert caps["token_required"] is True
+    assert "GET /api/auth-mode" in caps["endpoints"]
+
+
+@pytest.mark.parametrize(
+    "raw", ["1", "true", "TRUE", "Yes", "on", "  true  ", "0", "false", "no", "off", "", "   "]
+)
+def test_auth_disabled_flag_accepted_false_and_true_values(
+    monkeypatch: pytest.MonkeyPatch, ctl: FakeSystemctl, health: FakeHealth, raw: str
+) -> None:
+    monkeypatch.delenv("HAL_DASHBOARD_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("HAL_DASHBOARD_AUTH_DISABLED", raw)
+    application = _build(monkeypatch, ctl, health)
+    expected_required = raw.strip().lower() in {"", "0", "false", "no", "off"}
+    assert application.state.token_required is expected_required
+    # In disabled mode the token is never loaded or stored.
+    assert (application.state.token != "") is expected_required
+
+
+@pytest.mark.parametrize("raw", ["maybe", "2", "tru", "ture", "none", "true1", "01", "-1"])
+def test_invalid_auth_disabled_flag_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("HAL_DASHBOARD_AUTH_DISABLED", raw)
+    with pytest.raises(TokenError):
+        create_app(CONFIG_PATH)
+
+
+def test_auth_disabled_token_not_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    # In reverse-proxy mode startup must not require a valid token: clear it and
+    # the app still builds (a blank token would otherwise raise TokenError).
+    monkeypatch.setenv("HAL_DASHBOARD_AUTH_DISABLED", "true")
+    monkeypatch.setenv("HAL_DASHBOARD_TOKEN", "")
+    application = create_app(CONFIG_PATH)
+    assert application.state.token_required is False
+    assert application.state.token == ""
+
+
+def test_auth_disabled_allows_api_without_token(
+    monkeypatch: pytest.MonkeyPatch, ctl: FakeSystemctl, health: FakeHealth
+) -> None:
+    monkeypatch.setenv("HAL_DASHBOARD_AUTH_DISABLED", "true")
+    monkeypatch.delenv("HAL_DASHBOARD_TOKEN", raising=False)
+    application = create_app(CONFIG_PATH)
+    ctx = application.state.ctx
+    ctx.systemctl = ctl
+    ctx.health = health
+    ctx.probes = DynamicProbes(ctx.config, ctl, health)
+    with TestClient(application) as client:  # no X-Hal-Token header at all
+        assert client.get("/api/auth-mode").json() == {"token_required": False}
+        assert client.get("/api/health").json() == {"status": "ok"}
+        assert client.get("/api/config").status_code == 200
+        caps = client.get("/api/config").json()["capabilities"]
+        assert caps["token_required"] is False
+        assert client.get("/api/status").status_code == 200
+        response = client.post("/api/switch", json={"model_id": "sglang-qwen38-27b"})
+        assert response.status_code == 202
+        operation = wait_operation(client, response.json()["operation_id"])
+        assert operation["status"] == "succeeded"
+        assert client.get("/api/operations/does-not-exist").status_code == 404
+
+
+def test_origin_still_enforced_when_auth_disabled(
+    monkeypatch: pytest.MonkeyPatch, ctl: FakeSystemctl, health: FakeHealth
+) -> None:
+    monkeypatch.setenv("HAL_DASHBOARD_AUTH_DISABLED", "true")
+    application = create_app(CONFIG_PATH)
+    ctx = application.state.ctx
+    ctx.systemctl = ctl
+    ctx.health = health
+    ctx.probes = DynamicProbes(ctx.config, ctl, health)
+    payload = {"model_id": "sglang-qwen38-27b"}
+    with TestClient(application) as client:  # no token header
+        bad = client.post("/api/switch", json=payload, headers={"Origin": "https://evil.example"})
+        assert bad.status_code == 403
+        same = client.post("/api/switch", json=payload, headers={"Origin": "http://testserver"})
+        assert same.status_code == 202
+        wait_operation(client, same.json()["operation_id"])
+        plain = client.post("/api/switch", json=payload)  # no Origin -> allowed
+        assert plain.status_code == 202
+        wait_operation(client, plain.json()["operation_id"])
+        # PUT origin policy holds too.
+        bad_put = client.put(
+            "/api/services/comfyui", json={"active": True}, headers={"Origin": "https://evil.example"}
+        )
+        assert bad_put.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Security headers / CORS
 # ---------------------------------------------------------------------------
 

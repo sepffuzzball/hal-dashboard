@@ -5,7 +5,15 @@ probe cache live in process memory; running multiple workers would split them
 and break the single-flight mutation guarantee.
 
 Environment:
-  HAL_DASHBOARD_TOKEN           required; the shared admin token (X-Hal-Token).
+  HAL_DASHBOARD_TOKEN           required unless auth is disabled; the shared
+                                admin token (X-Hal-Token).
+  HAL_DASHBOARD_AUTH_DISABLED   optional opt-in reverse-proxy mode. When set to
+                                an accepted true value (1/true/yes/on, case-
+                                insensitive) the app requires no token and all
+                                API routes work unauthenticated: direct access
+                                then grants full admin and must be blocked by
+                                network policy / the reverse proxy. Absent/false
+                                keeps token auth. Any other value is rejected.
   HAL_DASHBOARD_CONFIG          optional path to the systems TOML file.
   HAL_DASHBOARD_ALLOWED_ORIGINS optional comma-separated exact origins for
                                 browser POST/PUT requests.
@@ -23,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hal_dashboard.auth import (
     TOKEN_HEADER,
+    load_auth_disabled,
     load_token,
     origin_allowed,
     parse_allowed_origins,
@@ -59,6 +68,9 @@ _CSP = (
     "frame-ancestors 'none'"
 )
 
+#: The only API endpoints reachable without a token when token auth is enabled.
+PUBLIC_API_PATHS = frozenset({"/api/health", "/api/auth-mode"})
+
 
 class SwitchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -83,7 +95,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     if path is None:
         path = Path(os.environ.get("HAL_DASHBOARD_CONFIG") or _DEFAULT_CONFIG_PATH)
     config = load_config(path)
-    token = load_token()
+    auth_disabled = load_auth_disabled()
+    token = "" if auth_disabled else load_token()
     allowed_origins = parse_allowed_origins(os.environ.get("HAL_DASHBOARD_ALLOWED_ORIGINS"))
 
     systemctl = Systemctl()
@@ -97,11 +110,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     )
     app.state.ctx = ctx
     app.state.token = token
+    app.state.token_required = not auth_disabled
     app.state.allowed_origins = allowed_origins
 
     # ------------------------------------------------------------------ #
     # Middleware: token auth, origin policy, security headers.
     # CORS is intentionally disabled (same-origin dashboard only).
+    # The browser Origin check runs for every /api POST/PUT in BOTH modes;
+    # the token check is skipped only when auth is deliberately disabled.
     # Registration order matters: the LAST registered middleware runs
     # outermost, so 'guard' is registered after 'authenticate' and decorates
     # every response - including authentication rejections - with security
@@ -110,16 +126,17 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     @app.middleware("http")
     async def authenticate(request: Request, call_next):  # type: ignore[no-untyped-def]
         path = request.url.path
-        if path.startswith("/api") and path != "/api/health":
-            provided = request.headers.get("x-hal-token")
-            if not token_matches(provided, app.state.token):
-                return _json_error(401, "missing or invalid token")
+        if path.startswith("/api"):
             if request.method in {"POST", "PUT"}:
                 origin = request.headers.get("origin")
                 if origin is not None and not origin_allowed(
                     origin, app.state.allowed_origins, request.headers.get("host", "")
                 ):
                     return _json_error(403, "origin not allowed")
+            if app.state.token_required and path not in PUBLIC_API_PATHS:
+                provided = request.headers.get("x-hal-token")
+                if not token_matches(provided, app.state.token):
+                    return _json_error(401, "missing or invalid token")
         return await call_next(request)
 
     def _apply_security_headers(request: Request, response) -> None:  # type: ignore[no-untyped-def]
@@ -143,6 +160,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    # ------------------------------------------------------------------ #
+    # Public authentication-mode probe (lets the frontend decide whether to
+    # show the token dialog). Minimal by design: never exposes any token.
+    # ------------------------------------------------------------------ #
+    @app.get("/api/auth-mode")
+    async def auth_mode() -> dict[str, bool]:
+        return {"token_required": bool(app.state.token_required)}
 
     # ------------------------------------------------------------------ #
     # Sanitized UI configuration (no paths, units, commands, or health URLs)
@@ -188,6 +213,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             "capabilities": {
                 "endpoints": [
                     "GET /api/health",
+                    "GET /api/auth-mode",
                     "GET /api/config",
                     "GET /api/status",
                     "POST /api/switch",
@@ -195,6 +221,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     "GET /api/operations/{operation_id}",
                 ],
                 "auth_header": TOKEN_HEADER,
+                "token_required": bool(app.state.token_required),
                 "cors_enabled": False,
                 "single_uvicorn_worker": True,
                 "max_operations_retained": OperationManager.MAX_HISTORY,

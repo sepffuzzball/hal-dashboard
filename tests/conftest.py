@@ -20,6 +20,10 @@ assert len(TEST_TOKEN) >= 32  # the startup policy enforces a 32-character minim
 os.environ["HAL_DASHBOARD_TOKEN"] = TEST_TOKEN
 os.environ["HAL_DASHBOARD_CONFIG"] = str(CONFIG_PATH)
 os.environ.pop("HAL_DASHBOARD_ALLOWED_ORIGINS", None)
+# The default fixtures and the import-time ``app`` must run in token mode, so
+# clear any ambient reverse-proxy-mode flag before ``hal_dashboard.main`` loads.
+os.environ.pop("HAL_DASHBOARD_AUTH_DISABLED", None)
+
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

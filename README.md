@@ -96,17 +96,20 @@ enforced at startup (`ConfigError` on violation):
 
 ## API summary
 
-All endpoints except `GET /api/health` require the header `X-Hal-Token: <token>`
-(shared admin token, constant-time compared; no cookies, no query-string auth).
+All endpoints except the public `GET /api/health` and `GET /api/auth-mode`
+require the header `X-Hal-Token: <token>` (shared admin token, constant-time
+compared; no cookies, no query-string auth) unless reverse-proxy mode is
+explicitly enabled (see [Authentication modes](#authentication-modes)).
 For POST/PUT, a browser `Origin` must exactly match
-`HAL_DASHBOARD_ALLOWED_ORIGINS` or the Host-derived same origin. CORS is not
-enabled. Responses carry CSP / `X-Frame-Options: DENY` / `nosniff` /
-`no-referrer`, and `/api/*` responses are `no-store`.
+`HAL_DASHBOARD_ALLOWED_ORIGINS` or the Host-derived same origin in **both**
+modes. CORS is not enabled. Responses carry CSP / `X-Frame-Options: DENY` /
+`nosniff` / `no-referrer`, and `/api/*` responses are `no-store`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | public liveness: `{"status":"ok"}` |
-| GET | `/api/config` | sanitized UI config (server info, refresh choices, model/service metadata, capabilities; no paths/units/commands/health URLs) |
+| GET | `/api/auth-mode` | public probe: `{"token_required": true\|false}` (never exposes the token) |
+| GET | `/api/config` | sanitized UI config (server info, refresh choices, model/service metadata, capabilities including `token_required`; no paths/units/commands/health URLs) |
 | GET | `/api/status` | CPU/RAM/root-disk, per-GPU metrics, service states, active models, conflict warning, active operation; unavailable values are `null` + reason |
 | POST | `/api/switch` | `{"model_id": str, "comfyui": bool|null}` → `202 {"operation_id","status_url"}`; validates before touching anything; already-desired topology is a successful no-op |
 | PUT | `/api/services/{id}` | `{"active": bool}` for configured auxiliary services only (models go through `/api/switch`); same `202` shape; ComfyUI activation returns `409` while a conflicting model is active |
@@ -174,6 +177,43 @@ matching polkit rule update, then `systemctl daemon-reload`, a polkit reload,
 and a dashboard restart. Anything the TOML does not declare simply cannot be
 touched through the API - there is no arbitrary-unit or arbitrary-command
 endpoint.
+
+## Authentication modes
+
+The dashboard ships with one secure default and one explicit opt-in mode. It is
+never a hidden default: token authentication is on unless you deliberately turn
+it off.
+
+**Token mode (default, secure).** `HAL_DASHBOARD_TOKEN` is required (min 32
+chars, placeholder-checked). Every `/api/*` route except the public
+`GET /api/health` and `GET /api/auth-mode` must present `X-Hal-Token`. The
+frontend probes `GET /api/auth-mode` (no credentials) on load; when it reports
+`token_required: true` it shows the token dialog and keeps its
+sessionStorage/login/lock behavior.
+
+**Reverse-proxy mode (opt-in).** Set `HAL_DASHBOARD_AUTH_DISABLED=true` to make
+the backend usable without its own token, for deployments bound publicly
+(e.g. `0.0.0.0:81`) behind a reverse proxy that authenticates every request. In
+this mode `HAL_DASHBOARD_TOKEN` is not required at startup and all API routes
+work without `X-Hal-Token`; the frontend's `GET /api/auth-mode` probe then
+reports `token_required: false`, loads the console immediately, hides the Lock
+control, and labels the session "Authentication delegated to reverse proxy". No
+token is logged or exposed. The browser `Origin` check on POST/PUT still applies
+in this mode exactly as before.
+
+Accepted values for `HAL_DASHBOARD_AUTH_DISABLED` are exactly `1`, `true`,
+`yes`, `on` (case-insensitive) for enabled, and absent/empty or `0`, `false`,
+`no`, `off` for the secure default; **any other value aborts startup** so a typo
+can never silently disable authentication.
+
+> **WARNING.** This flag is a deployment switch, not a credential, and the app
+> does **not** trust `X-Forwarded-*` (or any proxy header) as proof that a
+> request was authenticated. Turn it on only when BOTH conditions hold: your
+> reverse proxy authenticates **every** request, AND direct access to the
+> backend port is blocked by firewall/network policy. Binding the backend on
+> `0.0.0.0` without such restrictions means anyone who can reach the port gets
+> unauthenticated control of the managed systemd units. `GET /api/auth-mode` and
+> `GET /api/health` always stay public in either mode.
 
 ## Reverse proxy / TLS
 

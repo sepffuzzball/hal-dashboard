@@ -15,9 +15,12 @@ const STEP_LABELS = {
 
 const state = {
   token: sessionStorage.getItem(TOKEN_KEY) || "",
+  tokenRequired: true,
   config: null,
   status: null,
-  selectedModelId: null,
+  focusedModelId: null,
+  submittingModelId: null,
+  submittingMutation: false,
   refreshSeconds: 60,
   nextRefreshAt: 0,
   refreshTimer: null,
@@ -39,11 +42,9 @@ function initialize() {
     "refresh-interval", "refresh-button", "refresh-meta", "cpu-card", "memory-card",
     "storage-card", "gpu-cards", "server-specs", "operation-panel", "operation-status",
     "operation-elapsed", "operation-message", "operation-steps", "operation-final",
-    "dismiss-operation", "conflict-warning", "services-body", "review-button", "model-list",
+    "dismiss-operation", "conflict-warning", "services-body", "model-list",
     "document-state", "token-dialog", "token-form", "token-input", "token-copy", "token-error",
-    "unlock-button", "review-dialog", "review-form", "close-review", "review-model-name",
-    "review-eta", "review-changes", "comfy-policy", "comfy-options", "comfy-policy-copy",
-    "review-warning", "cancel-review", "confirm-switch", "live-region",
+    "unlock-button", "live-region",
   ];
   ids.forEach((id) => { el[toCamel(id)] = document.getElementById(id); });
 
@@ -52,22 +53,68 @@ function initialize() {
   el.lockButton.addEventListener("click", lockConsole);
   el.refreshButton.addEventListener("click", () => refreshStatus(true));
   el.refreshInterval.addEventListener("change", changeRefreshInterval);
-  el.reviewButton.addEventListener("click", openReview);
-  el.closeReview.addEventListener("click", closeReview);
-  el.cancelReview.addEventListener("click", closeReview);
-  el.reviewForm.addEventListener("submit", confirmSwitch);
-  el.comfyOptions.addEventListener("change", updateReviewChanges);
   el.dismissOperation.addEventListener("click", dismissOperation);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("online", () => refreshStatus(true));
   window.addEventListener("offline", () => setGlobalHealth("Offline", "failed"));
 
   checkPublicHealth();
+  beginSession();
+}
+
+// Decide the authentication flow before touching any protected endpoint. The
+// auth-mode probe is fetched without a token so the console can bypass the
+// token dialog entirely when the backend runs in reverse-proxy mode.
+async function beginSession() {
+  let tokenRequired;
+  try {
+    tokenRequired = await fetchAuthMode();
+  } catch (_) {
+    // Fail closed: if the mode is unknown, keep token auth and let the user
+    // retry by entering a token. This never weakens security.
+    state.tokenRequired = true;
+    showTokenDialog("The console could not determine its authentication mode. Check the connection or enter a token to retry.");
+    return;
+  }
+  state.tokenRequired = tokenRequired;
+  if (!tokenRequired) {
+    await startDelegatedSession();
+    return;
+  }
   if (state.token) {
     unlockWithStoredToken();
   } else {
     showTokenDialog();
   }
+}
+
+// Fetch /api/auth-mode with no credentials. Resolves to the token_required
+// boolean; rejects on network errors or an unexpected payload.
+async function fetchAuthMode() {
+  const response = await fetch("/api/auth-mode", { cache: "no-store" });
+  if (!response.ok) throw new Error("auth-mode unavailable");
+  const payload = await response.json();
+  if (typeof payload.token_required !== "boolean") throw new Error("unexpected auth-mode payload");
+  return payload.token_required;
+}
+
+// Reverse-proxy mode: load the console immediately, hide the Lock control, and
+// label the session as delegated. No token is ever sent.
+async function startDelegatedSession() {
+  try {
+    await loadConsole();
+  } catch (_) {
+    el.main.hidden = false;
+    el.lockButton.hidden = true;
+    el.lockButton.disabled = true;
+    el.documentState.textContent = "Authentication delegated to reverse proxy";
+    setGlobalHealth("Contact failed", "failed");
+    showNotice("Authentication is delegated to the reverse proxy, but the console could not load. Use Refresh now to retry.", true);
+  }
+}
+
+function hasActiveSession() {
+  return state.tokenRequired ? Boolean(state.token) : true;
 }
 
 function toCamel(value) {
@@ -130,8 +177,15 @@ async function loadConsole() {
   state.refreshSeconds = validRefreshDefault(config.refresh);
   renderConfig();
   el.main.hidden = false;
-  el.lockButton.hidden = false;
-  el.documentState.textContent = "Authenticated session";
+  if (state.tokenRequired) {
+    el.lockButton.hidden = false;
+    el.lockButton.disabled = false;
+    el.documentState.textContent = "Authenticated session";
+  } else {
+    el.lockButton.hidden = true;
+    el.lockButton.disabled = true;
+    el.documentState.textContent = "Authentication delegated to reverse proxy";
+  }
   await refreshStatus(true);
   scheduleRefresh();
 }
@@ -175,7 +229,7 @@ function renderServerSpecs(server) {
 }
 
 async function refreshStatus(manual = false) {
-  if (!state.token || state.refreshing || (document.hidden && !manual)) return;
+  if (!hasActiveSession() || state.refreshing || (document.hidden && !manual)) return;
   state.refreshing = true;
   el.refreshButton.disabled = true;
   if (manual) el.refreshMeta.textContent = "Refreshing status...";
@@ -188,7 +242,7 @@ async function refreshStatus(manual = false) {
     setGlobalHealth("Connected", "active");
     state.nextRefreshAt = Date.now() + state.refreshSeconds * 1000;
     if (status.active_operation && !state.operationUrl) {
-      beginOperationPolling(status.active_operation.status_url);
+      beginOperationPolling(status.active_operation.status_url, status.active_operation.target_model_id);
     }
     showNotice("", false);
   } catch (error) {
@@ -308,7 +362,7 @@ function renderServices(itemsOverride = null) {
     if (observed.reason) healthCell.append(create("span", "health-copy", safeReason(observed.reason, "Health detail unavailable")));
     const controlCell = cell("Control");
     if (spec.kind === "auxiliary") controlCell.append(serviceControls(spec, observed));
-    else controlCell.append(create("span", "control-reason", "Use model switch review"));
+    else controlCell.append(create("span", "control-reason", "Activate a model card to switch"));
     row.append(nameCell, roleCell, stateCell, healthCell, controlCell);
     el.servicesBody.append(row);
   });
@@ -353,35 +407,48 @@ function activeConflictForService(service) {
 
 function renderModels() {
   if (!state.config) return;
-  const activeIds = new Set((state.status && state.status.active_model_ids) || []);
+  const previouslyFocusedId = document.activeElement && document.activeElement.dataset.modelId;
+  const services = (state.status && state.status.services && state.status.services.items) || [];
+  const observedById = new Map(services.map((item) => [item.id, item]));
+  const loadingModelId = currentLoadingModelId();
+  const busy = mutationBusy();
   replaceChildren(el.modelList);
   state.config.models.forEach((model) => {
     const card = create("div", "model-card");
-    const active = activeIds.has(model.id);
-    const selected = state.selectedModelId === model.id;
+    card.dataset.modelId = model.id;
+    const observed = observedById.get(model.id);
+    const loading = loadingModelId === model.id;
+    const active = !loading && observed && observed.state === "active" && observed.healthy === true;
+    const starting = !loading && observed && (observed.state === "activating" || (observed.state === "active" && observed.healthy !== true));
     card.classList.toggle("active", active);
-    card.classList.toggle("selected", selected);
-    card.setAttribute("role", "radio");
-    card.setAttribute("aria-checked", String(selected));
-    card.setAttribute("aria-label", `${model.display_name}${active ? ", currently active" : ""}`);
-    card.tabIndex = selected || (!state.selectedModelId && model === state.config.models[0]) ? 0 : -1;
-    if (mutationBusy()) card.setAttribute("aria-disabled", "true");
+    card.classList.toggle("loading", loading);
+    card.setAttribute("role", "button");
+    const stateLabel = loading ? ", loading" : active ? ", active and healthy" : starting ? ", starting; health pending" : "";
+    card.setAttribute("aria-label", `Switch to ${model.display_name}${stateLabel}`);
+    const focusId = state.focusedModelId || (state.config.models[0] && state.config.models[0].id);
+    card.tabIndex = model.id === focusId ? 0 : -1;
+    if (busy) card.setAttribute("aria-disabled", "true");
     const top = create("div", "model-card-top");
     top.append(create("span", "metric-kicker", model.id));
-    if (active) top.append(statusBadge("Active", "active"));
+    if (loading) top.append(statusBadge("Loading", "loading"));
+    else if (active) top.append(statusBadge("Active", "active"));
+    else if (starting) top.append(statusBadge(observed.state === "active" ? "Health pending" : "Starting", "starting"));
     card.append(top, create("h3", null, model.display_name), create("p", "model-synopsis", model.synopsis));
     const meta = create("dl", "model-meta");
-    meta.append(metaItem("GPU allocation", formatGpuAllocation(model.gpus)), metaItem("Startup ETA", formatDuration(model.startup_eta_seconds)));
+    meta.append(metaItem("GPU allocation", formatGpuAllocation(model.gpus)), metaItem("Load window", formatLoadWindow(model)));
     card.append(meta);
     const strengths = create("ul", "strength-list");
     const entries = Array.isArray(model.strengths) && model.strengths.length ? model.strengths : ["General workloads"];
     entries.forEach((strength) => strengths.append(create("li", null, strength)));
     card.append(strengths);
-    card.addEventListener("click", () => selectModel(model.id));
+    card.addEventListener("click", () => activateModel(model));
     card.addEventListener("keydown", (event) => handleModelKey(event, model.id));
     el.modelList.append(card);
   });
-  updateMutationAvailability();
+  if (previouslyFocusedId) {
+    const focusedCard = Array.from(el.modelList.children).find((card) => card.dataset.modelId === previouslyFocusedId);
+    if (focusedCard) focusedCard.focus({ preventScroll: true });
+  }
 }
 
 function metaItem(term, value) {
@@ -390,24 +457,41 @@ function metaItem(term, value) {
   return wrapper;
 }
 
-function selectModel(modelId) {
-  if (mutationBusy()) return;
-  state.selectedModelId = modelId;
-  renderModels();
-  const selected = el.modelList.querySelector('[aria-checked="true"]');
-  if (selected) selected.focus({ preventScroll: true });
-}
-
 function handleModelKey(event, modelId) {
+  if (event.repeat) return;
   const models = state.config.models;
   const index = models.findIndex((model) => model.id === modelId);
   let next = null;
   if (["ArrowRight", "ArrowDown"].includes(event.key)) next = models[(index + 1) % models.length];
   if (["ArrowLeft", "ArrowUp"].includes(event.key)) next = models[(index - 1 + models.length) % models.length];
-  if (event.key === " " || event.key === "Enter") next = models[index];
-  if (!next) return;
+  if (next) {
+    event.preventDefault();
+    moveModelFocus(next.id);
+    return;
+  }
+  if (event.key !== " " && event.key !== "Enter") return;
   event.preventDefault();
-  selectModel(next.id);
+  activateModel(models[index]);
+}
+
+function moveModelFocus(modelId) {
+  state.focusedModelId = modelId;
+  Array.from(el.modelList.children).forEach((card, index) => {
+    const focused = state.config.models[index].id === modelId;
+    card.tabIndex = focused ? 0 : -1;
+    if (focused) card.focus({ preventScroll: true });
+  });
+}
+
+async function activateModel(model) {
+  if (!model || mutationBusy()) return;
+  state.focusedModelId = model.id;
+  state.submittingModelId = model.id;
+  state.submittingMutation = true;
+  el.liveRegion.textContent = `Loading ${model.display_name}. Model switch submitted.`;
+  renderModels();
+  renderServices();
+  await submitMutation("/api/switch", "POST", { model_id: model.id, comfyui: null }, model.id);
 }
 
 function renderConflictWarnings(conflict) {
@@ -420,95 +504,31 @@ function renderConflictWarnings(conflict) {
   el.conflictWarning.hidden = false;
 }
 
-function openReview() {
-  const model = selectedModel();
-  if (!model || mutationBusy()) return;
-  el.reviewModelName.textContent = model.display_name;
-  el.reviewEta.textContent = `Typical model startup: ${formatDuration(model.startup_eta_seconds)}`;
-  const radios = Array.from(el.comfyOptions.querySelectorAll('input[name="comfy"]'));
-  radios.forEach((radio) => {
-    radio.checked = radio.value === "auto";
-    radio.disabled = !model.allow_comfyui_override && radio.value !== "auto";
-  });
-  el.comfyPolicyCopy.textContent = model.allow_comfyui_override
-    ? `Auto follows this model's configured policy: ComfyUI ${model.comfyui_default ? "On" : "Off"}.`
-    : `Fixed policy: ComfyUI ${model.comfyui_default ? "On" : "Off"}. Override is not permitted for this model.`;
-  updateReviewChanges();
-  el.reviewDialog.showModal();
-}
-
-function updateReviewChanges() {
-  const model = selectedModel();
-  if (!model) return;
-  const desiredComfy = desiredComfyState(model);
-  const services = (state.status && state.status.services && state.status.services.items) || [];
-  const byId = new Map(services.map((item) => [item.id, item]));
-  const changes = new Set();
-  state.config.models.forEach((candidate) => {
-    const observed = byId.get(candidate.id);
-    if (candidate.id !== model.id && observed && ACTIVE_STATES.has(observed.state)) changes.add(`Stop ${candidate.display_name}.`);
-  });
-  state.config.services.forEach((service) => {
-    const observed = byId.get(service.id);
-    if (model.conflicts_with.includes(service.id) && observed && ACTIVE_STATES.has(observed.state)) changes.add(`Stop ${service.display_name}.`);
-  });
-  const selectedObserved = byId.get(model.id);
-  if (!selectedObserved || selectedObserved.state !== "active") changes.add(`Start and verify ${model.display_name}.`);
-  const comfy = state.config.services.find((service) => service.id === "comfyui");
-  const comfyObserved = comfy && byId.get(comfy.id);
-  if (comfy) {
-    if (desiredComfy && (!comfyObserved || !ACTIVE_STATES.has(comfyObserved.state))) changes.add("Start and verify ComfyUI.");
-    if (!desiredComfy && comfyObserved && ACTIVE_STATES.has(comfyObserved.state)) changes.add("Stop ComfyUI.");
-  }
-  replaceChildren(el.reviewChanges);
-  const changeItems = Array.from(changes);
-  (changeItems.length ? changeItems : ["No service state changes are expected; the server will verify the requested topology."]).forEach((change) => el.reviewChanges.append(create("li", null, change)));
-  const noChange = changeItems.length === 0;
-  el.reviewWarning.textContent = noChange
-    ? "The requested topology already appears active."
-    : "Services remain unchanged until you confirm. Stopping services and health checks can add time beyond the typical startup figure.";
-  el.confirmSwitch.disabled = noChange || mutationBusy();
-}
-
-function desiredComfyState(model) {
-  const checked = el.comfyOptions.querySelector('input[name="comfy"]:checked');
-  if (!checked || checked.value === "auto") return model.comfyui_default;
-  return checked.value === "on";
-}
-
-function selectedComfyOverride() {
-  const checked = el.comfyOptions.querySelector('input[name="comfy"]:checked');
-  if (!checked || checked.value === "auto") return null;
-  return checked.value === "on";
-}
-
-async function confirmSwitch(event) {
-  event.preventDefault();
-  const model = selectedModel();
-  if (!model || mutationBusy()) return;
-  const body = { model_id: model.id, comfyui: model.allow_comfyui_override ? selectedComfyOverride() : null };
-  closeReview();
-  await submitMutation("/api/switch", "POST", body);
-}
-
 async function setService(serviceId, active) {
   if (mutationBusy()) return;
+  state.submittingMutation = true;
+  renderServices();
+  renderModels();
   await submitMutation(`/api/services/${encodeURIComponent(serviceId)}`, "PUT", { active });
 }
 
-async function submitMutation(url, method, body) {
+async function submitMutation(url, method, body, targetModelId = null) {
   setMutationsDisabled(true);
   try {
     const response = await api(url, { method, body: JSON.stringify(body) });
-    beginOperationPolling(response.status_url);
+    state.submittingModelId = null;
+    state.submittingMutation = false;
+    beginOperationPolling(response.status_url, response.target_model_id || targetModelId);
   } catch (error) {
+    state.submittingModelId = null;
+    state.submittingMutation = false;
     if (error.status === 401) {
       handleUnauthorized();
       return;
     }
     if (error.status === 409 && error.payload && error.payload.status_url) {
       showNotice("Another operation is active. Following its progress instead.", false);
-      beginOperationPolling(error.payload.status_url);
+      beginOperationPolling(error.payload.status_url, error.payload.target_model_id);
       return;
     }
     const conflicts = error.payload && Array.isArray(error.payload.conflicts_with)
@@ -519,7 +539,7 @@ async function submitMutation(url, method, body) {
   }
 }
 
-function beginOperationPolling(statusUrl) {
+function beginOperationPolling(statusUrl, targetModelId = null) {
   if (!isLocalOperationUrl(statusUrl)) {
     showNotice("The operation response could not be followed safely.", true);
     setMutationsDisabled(false);
@@ -527,16 +547,20 @@ function beginOperationPolling(statusUrl) {
   }
   clearTimeout(state.operationTimer);
   state.operationUrl = statusUrl;
-  state.operation = { status: "queued", steps: [], created_at: new Date().toISOString() };
+  state.operation = { status: "queued", steps: [], created_at: new Date().toISOString(), target_model_id: targetModelId };
   renderOperation();
+  renderModels();
   pollOperation();
 }
 
 async function pollOperation() {
   if (!state.operationUrl) return;
   try {
-    state.operation = await api(state.operationUrl);
+    const previousTarget = state.operation && state.operation.target_model_id;
+    const operation = await api(state.operationUrl);
+    state.operation = { ...operation, target_model_id: operation.target_model_id || previousTarget || null };
     renderOperation();
+    renderModels();
     if (TERMINAL_STATES.has(state.operation.status)) {
       state.operationUrl = null;
       clearTimeout(state.operationTimer);
@@ -621,16 +645,20 @@ function dismissOperation() {
   clearInterval(state.elapsedTimer);
 }
 
-function closeReview() {
-  if (el.reviewDialog.open) el.reviewDialog.close();
+function mutationBusy() {
+  return Boolean(state.submittingMutation || state.submittingModelId || state.operationUrl || (state.status && state.status.active_operation));
 }
 
-function mutationBusy() {
-  return Boolean(state.operationUrl || (state.status && state.status.active_operation));
+function currentLoadingModelId() {
+  if (state.submittingModelId) return state.submittingModelId;
+  if (state.operation && !TERMINAL_STATES.has(state.operation.status) && state.operation.target_model_id) {
+    return state.operation.target_model_id;
+  }
+  const active = state.status && state.status.active_operation;
+  return active && active.target_model_id ? active.target_model_id : null;
 }
 
 function setMutationsDisabled(disabled) {
-  el.reviewButton.disabled = disabled || !state.selectedModelId;
   Array.from(el.servicesBody.querySelectorAll("button")).forEach((button) => { button.disabled = disabled || button.disabled; });
   if (!disabled) {
     renderServices();
@@ -639,7 +667,8 @@ function setMutationsDisabled(disabled) {
 }
 
 function updateMutationAvailability() {
-  el.reviewButton.disabled = mutationBusy() || !state.selectedModelId;
+  if (!mutationBusy()) renderServices();
+  renderModels();
 }
 
 function changeRefreshInterval() {
@@ -653,7 +682,7 @@ function changeRefreshInterval() {
 function scheduleRefresh() {
   clearInterval(state.refreshTimer);
   clearInterval(state.countdownTimer);
-  if (!state.token || document.hidden) {
+  if (!hasActiveSession() || document.hidden) {
     el.refreshMeta.textContent = document.hidden ? "Automatic refresh paused while hidden" : "Automatic refresh unavailable";
     return;
   }
@@ -677,7 +706,7 @@ function handleVisibilityChange() {
     clearInterval(state.refreshTimer);
     clearInterval(state.countdownTimer);
     updateCountdown();
-  } else if (state.token) {
+  } else if (hasActiveSession()) {
     refreshStatus(true);
     scheduleRefresh();
   }
@@ -687,7 +716,9 @@ function lockConsole() {
   state.token = "";
   state.config = null;
   state.status = null;
-  state.selectedModelId = null;
+  state.focusedModelId = null;
+  state.submittingModelId = null;
+  state.submittingMutation = false;
   sessionStorage.removeItem(TOKEN_KEY);
   clearInterval(state.refreshTimer);
   clearInterval(state.countdownTimer);
@@ -717,13 +748,19 @@ function showTokenDialog(message) {
 }
 
 async function api(path, options = {}) {
+  const headers = {};
+  // Only send the token when token auth is in play. In reverse-proxy mode the
+  // header is omitted entirely (never sent empty).
+  if (state.tokenRequired) {
+    headers["X-Hal-Token"] = state.token;
+  }
+  if (options.body) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(path, {
     ...options,
     cache: "no-store",
-    headers: {
-      "X-Hal-Token": state.token,
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-    },
+    headers,
   });
   let payload = null;
   try {
@@ -766,14 +803,10 @@ function statusBadge(text, status = text) {
 
 function statusClass(value) {
   const normalized = String(value || "unknown").toLowerCase();
-  const allowed = new Set(["active", "inactive", "activating", "deactivating", "failed", "unknown", "healthy", "unhealthy", "unchecked", "running", "queued", "succeeded", "done", "pending", "skipped"]);
+  const allowed = new Set(["active", "inactive", "activating", "deactivating", "failed", "unknown", "healthy", "unhealthy", "unchecked", "running", "queued", "succeeded", "done", "pending", "skipped", "loading", "starting"]);
   if (normalized === "done") return "succeeded";
   if (normalized === "pending") return "unknown";
   return allowed.has(normalized) ? normalized : "unknown";
-}
-
-function selectedModel() {
-  return state.config && state.config.models.find((model) => model.id === state.selectedModelId);
 }
 
 function isLocalOperationUrl(value) {
@@ -806,10 +839,10 @@ function formatPercent(value) { return Number(value).toFixed(Number(value) % 1 =
 function percentOrDash(value) { return Number.isFinite(value) ? `${formatPercent(value)}%` : "--"; }
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return "--";
-  const units = ["B", "KB", "GB", "TB"];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;
   let index = 0;
-  while (value >= 1000 && index < units.length - 1) { value /= 1000; index += 1; }
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
   return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 function formatDuration(seconds) {
@@ -820,6 +853,16 @@ function formatDuration(seconds) {
   return remainder ? `${minutes} min ${remainder} sec` : `${minutes} min`;
 }
 function formatInterval(seconds) { return seconds < 60 ? `${seconds} seconds` : seconds === 60 ? "60 seconds" : `${seconds / 60} minutes`; }
+function formatLoadWindow(model) {
+  const minimum = model.startup_eta_min_seconds;
+  const maximum = model.startup_eta_seconds;
+  if (!Number.isFinite(minimum)) return formatDuration(maximum);
+  if (!Number.isFinite(maximum) || maximum === minimum) return formatDuration(minimum);
+  if (minimum >= 60 && maximum >= 60 && minimum % 60 === 0 && maximum % 60 === 0) {
+    return `${minimum / 60}-${maximum / 60} min`;
+  }
+  return `${formatDuration(minimum)}-${formatDuration(maximum)}`;
+}
 function formatGpuAllocation(gpus) { return Array.isArray(gpus) && gpus.length ? gpus.map((gpu) => `GPU ${gpu}`).join(" + ") : "None"; }
 function formatTime(date) { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date); }
 function titleCase(value) { return humanize(value).replace(/\b\w/g, (letter) => letter.toUpperCase()); }

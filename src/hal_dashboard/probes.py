@@ -114,8 +114,10 @@ class HealthChecker:
             request = urllib.request.Request(url, method="GET")  # noqa: S310 - scheme validated at config load
             with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
                 return 200 <= response.status < 400
-        except urllib.error.HTTPStatusError:
+        except urllib.error.HTTPError:
             # The endpoint answered: the service is reachable but unhealthy.
+            # urllib raises HTTPError (a URLError subclass) for non-success
+            # statuses, so this clause must stay ahead of the URLError one.
             return False
         except (urllib.error.URLError, OSError, ValueError):
             return None

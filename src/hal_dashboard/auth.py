@@ -6,6 +6,13 @@ cookies, no query-string auth, and no per-user roles: the token grants full
 admin. For mutating requests (POST/PUT), a browser-supplied ``Origin`` must
 exactly match one of the configured allowed origins or the Host-derived
 same origin.
+
+Token authentication is the secure default. It can be deliberately turned off
+for a deployment that sits behind a trusted reverse proxy that authenticates
+every request; see :func:`load_auth_disabled` and ``HAL_DASHBOARD_AUTH_DISABLED``.
+That flag is a deployment switch only: it trusts the network boundary, never
+``X-Forwarded-*`` headers, and grants full admin to anyone who can reach the
+backend directly.
 """
 
 from __future__ import annotations
@@ -14,11 +21,13 @@ import os
 import secrets
 
 __all__ = [
+    "AUTH_DISABLED_ENV",
     "MIN_TOKEN_LENGTH",
     "ORIGINS_ENV",
     "TOKEN_ENV",
     "TOKEN_HEADER",
     "TokenError",
+    "load_auth_disabled",
     "load_token",
     "origin_allowed",
     "parse_allowed_origins",
@@ -27,6 +36,15 @@ __all__ = [
 
 TOKEN_ENV = "HAL_DASHBOARD_TOKEN"
 ORIGINS_ENV = "HAL_DASHBOARD_ALLOWED_ORIGINS"
+#: Explicit opt-in switch that disables the dashboard's own token auth so it can
+#: run behind a reverse proxy that authenticates every request. Absent/false by
+#: default (token auth on); accepted exactly (case-insensitive) as the true set
+#: below. Any other value is rejected at startup.
+AUTH_DISABLED_ENV = "HAL_DASHBOARD_AUTH_DISABLED"
+#: Case-insensitive values accepted as "disable token auth".
+_AUTH_DISABLED_TRUE = frozenset({"1", "true", "yes", "on"})
+#: Case-insensitive values accepted as "keep token auth" (including empty/absent).
+_AUTH_DISABLED_FALSE = frozenset({"", "0", "false", "no", "off"})
 #: Minimum accepted length (after stripping) for the shared admin token.
 MIN_TOKEN_LENGTH = 32
 #: The one and only accepted authentication header (HTTP header names are
@@ -94,6 +112,27 @@ def load_token(env: dict[str, str] | None = None) -> str:
             f"{TOKEN_ENV} looks like an example/placeholder token; generate a real secret"
         )
     return token
+
+
+def load_auth_disabled(env: dict[str, str] | None = None) -> bool:
+    """Read and sanity-check ``HAL_DASHBOARD_AUTH_DISABLED`` from the environment.
+
+    Returns ``True`` only when the value is an accepted truthy token (case-
+    insensitive ``1``, ``true``, ``yes``, ``on``). Returns ``False`` for the
+    secure default: the variable absent, empty, or one of ``0``, ``false``,
+    ``no``, ``off``. Any other value is a configuration error and is rejected
+    at startup so a typo can never silently disable authentication.
+    """
+    source = os.environ if env is None else env
+    value = source.get(AUTH_DISABLED_ENV, "").strip().lower()
+    if value in _AUTH_DISABLED_FALSE:
+        return False
+    if value in _AUTH_DISABLED_TRUE:
+        return True
+    accepted = ", ".join(sorted(_AUTH_DISABLED_TRUE | _AUTH_DISABLED_FALSE - {""}))
+    raise TokenError(
+        f"{AUTH_DISABLED_ENV} must be one of [{accepted}] (or unset); got {value!r}"
+    )
 
 
 def token_matches(provided: str | None, expected: str) -> bool:

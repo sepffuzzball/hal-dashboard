@@ -105,12 +105,12 @@
       <div class="section-heading">
         <div>
           <p class="section-index">03 / Model routing</p>
-          <h2 id="models-heading">Select inference system</h2>
+          <h2 id="models-heading">Switch inference system</h2>
         </div>
-        <button id="review-button" class="action-button" type="button" disabled>Review switch</button>
+        <p class="section-note">Observed state determines when a system is active</p>
       </div>
-      <p id="selection-help" class="section-note">Choose a configured system. Selection alone makes no changes.</p>
-      <div id="model-list" class="model-list" role="radiogroup" aria-describedby="selection-help"></div>
+      <p id="model-help" class="model-help">Activate a system to switch immediately. Use arrow keys to move between systems.</p>
+      <div id="model-list" class="model-list" aria-describedby="model-help"></div>
     </section>
   </main>
 
@@ -129,43 +129,6 @@
       <input id="token-input" name="token" type="password" autocomplete="current-password" required>
       <p id="token-error" class="field-error" role="alert" hidden></p>
       <button id="unlock-button" class="action-button full-button" type="submit">Unlock console</button>
-    </form>
-  </dialog>
-
-  <dialog id="review-dialog" class="review-dialog" aria-labelledby="review-title">
-    <form id="review-form" method="dialog">
-      <div class="dialog-header">
-        <div>
-          <p class="section-index">Review change</p>
-          <h2 id="review-title">Confirm model switch</h2>
-        </div>
-        <button id="close-review" class="icon-button" type="button" aria-label="Close review dialog">Close</button>
-      </div>
-      <div class="review-model">
-        <p class="review-label">Selected system</p>
-        <strong id="review-model-name"></strong>
-        <span id="review-eta" class="tabular"></span>
-      </div>
-      <div class="review-grid">
-        <div>
-          <h3>Expected service changes</h3>
-          <ul id="review-changes" class="change-list"></ul>
-        </div>
-        <fieldset id="comfy-policy">
-          <legend>ComfyUI desired state</legend>
-          <div id="comfy-options" class="segmented-control">
-            <label><input type="radio" name="comfy" value="auto" checked><span>Auto</span></label>
-            <label><input type="radio" name="comfy" value="on"><span>On</span></label>
-            <label><input type="radio" name="comfy" value="off"><span>Off</span></label>
-          </div>
-          <p id="comfy-policy-copy" class="policy-copy"></p>
-        </fieldset>
-      </div>
-      <p id="review-warning" class="dialog-warning"></p>
-      <div class="dialog-actions">
-        <button id="cancel-review" class="quiet-button" type="button">Cancel</button>
-        <button id="confirm-switch" class="action-button" type="submit">Confirm switch</button>
-      </div>
     </form>
   </dialog>
 
