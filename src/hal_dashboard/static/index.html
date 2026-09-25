@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#10100f">
-  <meta name="hal-dashboard-build" content="20260924-3">
+  <meta name="hal-dashboard-build" content="20260924-4">
   <title>HAL Operations Console</title>
-  <link rel="icon" href="/favicon.svg?v=20260924-3" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=20260924-3">
-  <script src="/app.js?v=20260924-3" defer></script>
+  <link rel="icon" href="/favicon.svg?v=20260924-4" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=20260924-4">
+  <script src="/app.js?v=20260924-4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to dashboard</a>
@@ -88,20 +88,7 @@
         <p class="section-note">Observed states, not requested states</p>
       </div>
       <div id="conflict-warning" class="warning-block" role="alert" hidden></div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Service</th>
-              <th scope="col">Role</th>
-              <th scope="col">System state</th>
-              <th scope="col">HTTP health</th>
-              <th scope="col">Control</th>
-            </tr>
-          </thead>
-          <tbody id="services-body"></tbody>
-        </table>
-      </div>
+      <div id="services-body" class="service-grid"></div>
     </section>
 
     <section class="models-section" aria-labelledby="models-heading">

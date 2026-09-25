@@ -1,6 +1,6 @@
 "use strict";
 
-const BUILD_ID = "20260924-3";
+const BUILD_ID = "20260924-4";
 const TOKEN_KEY = "hal-dashboard-token";
 const MIN_REFRESH_SECONDS = 5;
 const MAX_REFRESH_SECONDS = 300;
@@ -354,32 +354,29 @@ function renderServices(itemsOverride = null) {
   replaceChildren(el.servicesBody);
   const configured = [
     ...state.config.models.map((item) => ({ ...item, kind: "model" })),
-    ...state.config.services.map((item) => ({ ...item, kind: "auxiliary" })),
+    ...state.config.services.map((item) => ({ ...item, kind: "service" })),
   ];
   configured.forEach((spec) => {
     const observed = byId.get(spec.id) || { id: spec.id, display_name: spec.display_name, kind: spec.kind, state: "unknown", healthy: null, reason: "Status unavailable" };
-    const row = create("tr");
-    const nameCell = cell("Service");
-    nameCell.append(document.createTextNode(spec.display_name), create("span", "service-sub", spec.id));
-    const roleCell = cell("Role", spec.kind === "model" ? "Inference model" : "Auxiliary");
-    const stateCell = cell("System state");
-    stateCell.append(statusBadge(observed.state));
-    const healthCell = cell("HTTP health");
+    const card = create("article", "service-card");
+    card.setAttribute("aria-label", `${spec.display_name} service status`);
+    const heading = create("header", "service-card-heading");
+    heading.append(create("h3", null, spec.display_name), create("span", "service-sub", spec.id));
+    const statuses = create("div", "service-status-grid");
+    const systemStatus = create("div", "service-status");
+    systemStatus.append(create("p", "service-field-label", "System"), statusBadge(observed.state));
+    const httpStatus = create("div", "service-status");
     const health = observed.healthy === true ? ["Healthy", "healthy"] : observed.healthy === false ? ["Unhealthy", "unhealthy"] : ["Not verified", "unchecked"];
-    healthCell.append(statusBadge(health[0], health[1]));
-    if (observed.reason) healthCell.append(create("span", "health-copy", safeReason(observed.reason, "Health detail unavailable")));
-    const controlCell = cell("Control");
-    if (spec.kind === "auxiliary") controlCell.append(serviceControls(spec, observed));
-    else controlCell.append(create("span", "control-reason", "Activate a model card to switch"));
-    row.append(nameCell, roleCell, stateCell, healthCell, controlCell);
-    el.servicesBody.append(row);
+    httpStatus.append(create("p", "service-field-label", "HTTP"), statusBadge(health[0], health[1]));
+    if (observed.reason) httpStatus.append(create("span", "health-copy", safeReason(observed.reason, "Health detail unavailable")));
+    statuses.append(systemStatus, httpStatus);
+    const control = create("div", "service-control-area");
+    control.append(create("p", "service-field-label", "Control"));
+    if (spec.kind === "service") control.append(serviceControls(spec, observed));
+    else control.append(create("span", "control-reason", "Activate a model card to switch"));
+    card.append(heading, statuses, control);
+    el.servicesBody.append(card);
   });
-}
-
-function cell(label, text) {
-  const td = create("td", null, text);
-  td.dataset.label = label;
-  return td;
 }
 
 function serviceControls(spec, observed) {

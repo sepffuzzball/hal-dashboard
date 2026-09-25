@@ -25,7 +25,7 @@ INDEX_HTML = STATIC_DIR / "index.html"
 APP_JS = STATIC_DIR / "app.js"
 STYLE_CSS = STATIC_DIR / "styles.css"
 
-BUILD_ID = "20260924-3"
+BUILD_ID = "20260924-4"
 
 
 def _function_body(source: str, start_marker: str, end_marker: str) -> str:
@@ -173,7 +173,7 @@ def test_active_conflict_derived_from_service_states() -> None:
 
 
 def test_build_id_matches_versioned_asset_urls() -> None:
-    """The meta build marker and every versioned asset URL agree on 20260924-3."""
+    """The meta build marker and every versioned asset URL agree."""
     html = INDEX_HTML.read_text(encoding="utf-8")
     assert f'content="{BUILD_ID}"' in html
     versions = set(re.findall(r"\?v=([0-9A-Za-z-]+)", html))
@@ -183,3 +183,31 @@ def test_build_id_matches_versioned_asset_urls() -> None:
 
     app = APP_JS.read_text(encoding="utf-8")
     assert f'const BUILD_ID = "{BUILD_ID}";' in app
+
+
+def test_runtime_uses_semantic_service_cards_without_role_data() -> None:
+    """Runtime status is an article grid, not a table with role metadata."""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    app = APP_JS.read_text(encoding="utf-8")
+    assert 'id="services-body" class="service-grid"' in html
+    assert not re.search(r"<(?:table|thead|tbody|th|td)\b", html)
+    assert 'create("article", "service-card")' in app
+    assert '"System"' in app and '"HTTP"' in app
+    assert "Inference model" not in app
+    assert "Auxiliary" not in app
+    assert "function cell(" not in app
+
+
+def test_runtime_grid_and_telemetry_are_compact_and_responsive() -> None:
+    """Wide runtime is four columns and telemetry shares the GPU card height."""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert re.search(
+        r"\.service-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)",
+        css,
+        re.DOTALL,
+    )
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+    assert "grid-template-columns: minmax(0, 1fr);" in css
+    assert re.search(r"\.metric-card\s*\{[^}]*min-height:\s*10\.5rem", css, re.DOTALL)
+    assert ".gpu-card { min-height: 10.5rem; }" in css
+    assert not re.search(r"(?:table|thead|tbody|\bth\b|\btd\b)", css)

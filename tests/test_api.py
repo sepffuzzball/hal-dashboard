@@ -664,7 +664,7 @@ def test_favicon_is_packaged_and_served(client: TestClient) -> None:
     favicon_path = static_dir / "favicon.svg"
     assert favicon_path.is_file()
 
-    response = client.get("/favicon.svg?v=20260924-3")
+    response = client.get("/favicon.svg?v=20260924-4")
     assert response.status_code == 200
     assert "image/svg+xml" in response.headers["content-type"]
     body = response.text
@@ -679,9 +679,9 @@ def test_frontend_responses_are_not_stored(client: TestClient) -> None:
         "/app.js",
         "/styles.css",
         "/favicon.svg",
-        "/app.js?v=20260924-3",
-        "/styles.css?v=20260924-3",
-        "/favicon.svg?v=20260924-3",
+        "/app.js?v=20260924-4",
+        "/styles.css?v=20260924-4",
+        "/favicon.svg?v=20260924-4",
     ):
         response = client.get(path)
         assert response.status_code == 200
@@ -699,14 +699,14 @@ def test_frontend_responses_are_not_stored(client: TestClient) -> None:
 
     # The served HTML references versioned asset URLs and a build marker.
     index = client.get("/")
-    assert 'href="/favicon.svg?v=20260924-3"' in index.text
-    assert 'href="/styles.css?v=20260924-3"' in index.text
-    assert 'src="/app.js?v=20260924-3"' in index.text
-    assert '<meta name="hal-dashboard-build" content="20260924-3">' in index.text
+    assert 'href="/favicon.svg?v=20260924-4"' in index.text
+    assert 'href="/styles.css?v=20260924-4"' in index.text
+    assert 'src="/app.js?v=20260924-4"' in index.text
+    assert '<meta name="hal-dashboard-build" content="20260924-4">' in index.text
 
     # The versioned app.js carries the build id and the guarded dismiss listener.
-    app_js = client.get("/app.js?v=20260924-3")
-    assert 'const BUILD_ID = "20260924-3";' in app_js.text
+    app_js = client.get("/app.js?v=20260924-4")
+    assert 'const BUILD_ID = "20260924-4";' in app_js.text
     assert "if (el.dismissOperation) el.dismissOperation.addEventListener(" in app_js.text
     assert "el.dismissOperation.addEventListener(" in app_js.text
 
