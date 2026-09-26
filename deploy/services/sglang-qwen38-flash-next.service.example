@@ -8,12 +8,12 @@
 #   The dashboard switches between exactly one LLM backend at a time, so all
 #   three bind the SAME loopback port and serve the SAME model name. External
 #   LLM clients therefore always use base URL http://127.0.0.1:8000/v1 and
-#   model name 'hal-current', no matter which backend is currently active
+#   model name 'hal', no matter which backend is currently active
 #   (no proxy layer needed; the mutually exclusive services take turns on the
 #   port). config/systems.toml checks http://127.0.0.1:8000/health.
 #     - LLM_PORT: common loopback port, must be 8000.
 #     - SGLang required args: --host 127.0.0.1 --port $LLM_PORT
-#                             --served-model-name hal-current
+#                             --served-model-name hal
 #   Never run two model services at once: the second bind on :8000 fails.
 
 [Unit]
@@ -31,11 +31,23 @@ Environment=CUDA_VISIBLE_DEVICES=0
 # Shared LLM endpoint identity: every backend listens on 127.0.0.1:$LLM_PORT.
 Environment=LLM_PORT=8000
 
+# Compiler toolchain override for SGLang JIT and host-side compilation
+# (TorchInductor, Triton, FlashInfer). On some hosts the venv's `gcc-15`/`g++-15`
+# wrappers cannot locate `cc1plus`, so the GCC 15 toolchain root must be injected
+# explicitly: `g++` must be able to reach its `cc1plus` (e.g. a
+# `/usr/local/gcc-15/bin/g++` that resolves it). Define these via
+# sglang-qwen38-flash-next.env (preferred) or via Environment= below. These are
+# PLACEHOLDERS: replace __CC__/__CXX__/__CUDAHOSTCXX__ with your real GCC 15
+# compiler paths, or delete these lines and set the variables in the env file.
+Environment=CC=__CC__
+Environment=CXX=__CXX__
+Environment=CUDAHOSTCXX=__CUDAHOSTCXX__
+
 # PLACEHOLDER (impossible on purpose): replace __SGLANG_VENV__ with your real
 # SGLang virtualenv and __MODEL_PATH__ with your real model directory. The
-# served model name MUST stay 'hal-current' and the port MUST stay 8000 so
+# served model name MUST stay 'hal' and the port MUST stay 8000 so
 # external clients are unaffected by model switches.
-ExecStart=__SGLANG_VENV__/bin/python -m sglang.launch_server --model-path __MODEL_PATH__ --served-model-name hal-current --host 127.0.0.1 --port $LLM_PORT
+ExecStart=__SGLANG_VENV__/bin/python -m sglang.launch_server --model-path __MODEL_PATH__ --served-model-name hal --host 127.0.0.1 --port $LLM_PORT
 
 Restart=on-failure
 RestartSec=5

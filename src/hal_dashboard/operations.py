@@ -30,7 +30,9 @@ __all__ = [
     "BusyError",
     "Operation",
     "OperationManager",
+    "SERVICE_RESTART_STEPS",
     "ServiceStepError",
+    "run_service_restart",
     "run_service_toggle",
     "run_switch",
 ]
@@ -274,6 +276,7 @@ class OperationManager:
 
 SWITCH_STEPS = ["snapshot", "stop-others", "start-model", "companion-service"]
 SERVICE_TOGGLE_STEPS = ["snapshot", "apply-state"]
+SERVICE_RESTART_STEPS = ["snapshot", "stop-service", "start-service"]
 
 
 async def _unit_state(ctx: AppContext, unit: str) -> str:
@@ -548,3 +551,99 @@ async def run_service_toggle(ctx: AppContext, operation: Operation) -> str:
 
     operation.services = await _observe_all(ctx)
     return service.display_name + (" started" if desired_active else " stopped")
+
+
+# ---------------------------------------------------------------------------
+# Companion service restart (ComfyUI only)
+# ---------------------------------------------------------------------------
+
+
+async def run_service_restart(ctx: AppContext, operation: Operation) -> str:
+    """Verified stop-then-start restart of the ComfyUI companion service.
+
+    Restricted defensively to ``COMPANION_SERVICE_ID``: the operation only
+    composes the already-granted ``start``/``stop`` polkit verbs, so no unit
+    gains a generic restart privilege. Safety validation runs here (after the
+    snapshot, inside the single-flight lock) instead of at request time:
+    because every dashboard mutation holds the same lock, no other
+    dashboard/API operation can change a state between this validation and
+    the mutation. This closes dashboard-side races only - an external actor
+    invoking systemctl directly is outside the manager, so its changes can
+    still land after the snapshot; the verified stop and the post-health
+    active re-check bound the consequences of such an out-of-band change.
+
+    * ComfyUI itself must be exactly ``active`` (never activating/deactivating
+      or stopped - restarting something that is not verifiably running could
+      leave it stopped), and
+    * every model that declares a conflict with ComfyUI must be positively
+      stopped (``inactive``/``failed``); ``active``, ``activating``,
+      ``deactivating`` and ``unknown`` are all rejected fail-closed.
+
+    Validation failures happen before any mutation and therefore need no
+    rollback. Once the stop begins, any failure restores only ComfyUI
+    best-effort to its snapshot state (never the whole topology: unrelated
+    units may legitimately have changed since the snapshot, and this
+    operation mutates nothing but ComfyUI), and the operation reports the
+    failure consistently with the other runners. Success additionally requires
+    the unit to still be exactly ``active`` after the HTTP-health check, so a
+    process that exits during verification can never be reported successful.
+    """
+    config = ctx.config
+    service = config.service_by_id(str(operation.params["service_id"]))
+    if service is None:  # validated at request time; defensive
+        raise ServiceStepError("unknown service")
+    if service.id != COMPANION_SERVICE_ID:
+        raise ServiceStepError("restart is only supported for the comfyui service")
+
+    operation.begin_step("snapshot")
+    snapshot: dict[str, str] = {}
+    for spec in list(config.models) + list(config.services):
+        snapshot[spec.unit] = await _unit_state(ctx, spec.unit)
+    operation.complete_step("snapshot")
+
+    # Pre-mutation validation (fail-closed; nothing changed yet, no rollback).
+    if snapshot[service.unit] != "active":
+        operation.services = await _observe_all(ctx)
+        raise ServiceStepError("restart requires the service to be exactly active")
+    conflicting = [
+        model.id
+        for model in config.models
+        if service.id in model.conflicts_with and snapshot[model.unit] not in _STOPPED_STATES
+    ]
+    if conflicting:
+        operation.services = await _observe_all(ctx)
+        raise ServiceStepError(
+            "restart blocked: conflicting model " + ", ".join(conflicting) + " is not stopped"
+        )
+
+    try:
+        operation.begin_step("stop-service")
+        await _ensure_stopped(ctx, service.unit)
+        operation.complete_step("stop-service")
+
+        operation.begin_step("start-service")
+        await _start_and_verify_service(ctx, service)
+        # HTTP health verified; re-read the systemd state explicitly. A unit
+        # that exited right after answering health checks must not be
+        # reported as a successful restart.
+        final_state = await _unit_state(ctx, service.unit)
+        if final_state != "active":
+            raise ServiceStepError("service did not remain active after verification")
+        operation.complete_step("start-service")
+    except ServiceStepError as exc:
+        # Restore only the unit this operation mutates; unrelated units are
+        # deliberately left in whatever state they are observed in.
+        await _restore_unit(ctx, service.unit, snapshot[service.unit])
+        operation.services = await _observe_all(ctx)
+        raise ServiceStepError(
+            f"{exc.kind}; previous state restored on a best-effort basis"
+        ) from exc
+    except Exception as exc:
+        await _restore_unit(ctx, service.unit, snapshot[service.unit])
+        operation.services = await _observe_all(ctx)
+        raise ServiceStepError(
+            f"operation failed ({type(exc).__name__}); best-effort rollback performed"
+        ) from exc
+
+    operation.services = await _observe_all(ctx)
+    return f"{service.display_name} restarted"

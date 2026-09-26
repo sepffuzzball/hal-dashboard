@@ -4,7 +4,7 @@ These prove the refactor that lets a selected model take up to
 ``startup_timeout_seconds`` (one monotonic deadline) to become systemd-active
 and HTTP-healthy, instead of a short 60-second health window. All of them run
 quickly: the wall clock is faked and ``asyncio.sleep`` advances it, so a
-simulated 900-second budget never actually waits real seconds.
+simulated 1800-second budget never actually waits real seconds.
 """
 
 from __future__ import annotations
@@ -79,14 +79,14 @@ def test_start_and_verify_model_waits_past_old_60s_health_budget(
 ) -> None:
     """A Type=simple unit is active immediately, but health is unavailable for
     more than the old hard-coded 60 seconds (i.e. more than 300 poll rounds at
-    0.2s); the model must still succeed well inside the 900s deadline."""
+    0.2s); the model must still succeed well inside the 1800s deadline."""
     clock = FakeClock()
     _wire_fake_time(monkeypatch, clock)
 
     async def scenario() -> None:
         config = load_config(CONFIG_PATH)
         model = config.model_by_id("vllm-dsv4-flash-vision")
-        assert model is not None and model.startup_timeout_seconds == 900
+        assert model is not None and model.startup_timeout_seconds == 1800
         ctl = FakeSystemctl()
         # Health is unavailable for 310 polls -> 62 simulated seconds, then OK.
         health = LateHealthy(unavailable_checks=310)
@@ -110,13 +110,13 @@ def test_start_and_verify_model_fails_when_health_never_ready(
     async def scenario() -> None:
         config = load_config(CONFIG_PATH)
         model = config.model_by_id("sglang-qwen38-flash-next")
-        assert model is not None and model.startup_timeout_seconds == 900
+        assert model is not None and model.startup_timeout_seconds == 1800
         ctl = FakeSystemctl()
         ctx = await _ctx(config, ctl, NeverHealthy())
         with pytest.raises(ops.ServiceStepError, match="health endpoint unreachable"):
             await _start_and_verify_model(ctx, model)
         # The clock truly advanced through the full deadline.
-        assert clock.now >= 900.0
+        assert clock.now >= 1800.0
 
     asyncio.run(scenario())
 
@@ -148,6 +148,6 @@ def test_switch_rolls_back_best_effort_when_health_never_ready(
         # The selected model was stopped again.
         assert ctl.states["sglang-qwen38-27b.service"] == "inactive"
         # The deadline really elapsed.
-        assert clock.now >= 900.0
+        assert clock.now >= 1800.0
 
     asyncio.run(scenario())

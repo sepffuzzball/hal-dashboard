@@ -25,7 +25,7 @@ INDEX_HTML = STATIC_DIR / "index.html"
 APP_JS = STATIC_DIR / "app.js"
 STYLE_CSS = STATIC_DIR / "styles.css"
 
-BUILD_ID = "20260924-4"
+BUILD_ID = "20260926-3"
 
 
 def _function_body(source: str, start_marker: str, end_marker: str) -> str:
@@ -39,11 +39,10 @@ def test_redundant_section_titles_are_sr_only() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     for heading in (
         '<h1 id="overview-heading" class="sr-only">',
-        '<h2 id="services-heading" class="sr-only">',
-        '<h2 id="models-heading" class="sr-only">',
+        '<h2 id="inference-heading">',
     ):
         assert heading in html
-    assert html.count('class="sr-only"') >= 3
+    assert html.count('class="sr-only"') >= 1
 
 
 def test_operation_overlay_a11y_semantics() -> None:
@@ -56,6 +55,39 @@ def test_operation_overlay_a11y_semantics() -> None:
         'id="operation-panel" class="operation-panel" role="dialog" aria-modal="true"'
         ' aria-labelledby="operation-heading" tabindex="-1" hidden' in html
     )
+
+
+def test_operation_overlay_is_centered_on_desktop_and_inset_on_mobile() -> None:
+    """Desktop centers on both axes while the mobile rule restores edge insets."""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    desktop = re.search(r"\.operation-panel\s*\{(?P<body>[^}]*)\}", css, re.DOTALL)
+    assert desktop is not None
+    declarations = desktop.group("body")
+    for declaration in (
+        r"top:\s*50%\s*;",
+        r"right:\s*auto\s*;",
+        r"left:\s*50%\s*;",
+        r"transform:\s*translate\(\s*-50%\s*,\s*-50%\s*\)\s*;",
+    ):
+        assert re.search(declaration, declarations)
+
+    mobile_start = css.index("@media (max-width: 44rem)")
+    mobile_end = css.index("@media (max-width: 28rem)", mobile_start)
+    mobile_panel = re.search(
+        r"\.operation-panel\s*\{(?P<body>[^}]*)\}",
+        css[mobile_start:mobile_end],
+        re.DOTALL,
+    )
+    assert mobile_panel is not None
+    mobile_declarations = mobile_panel.group("body")
+    for declaration in (
+        r"top:\s*1rem\s*;",
+        r"right:\s*1rem\s*;",
+        r"left:\s*1rem\s*;",
+        r"width:\s*auto\s*;",
+        r"transform:\s*none\s*;",
+    ):
+        assert re.search(declaration, mobile_declarations)
 
 
 def test_operation_overlay_js_uses_body_class_and_focus_management() -> None:
@@ -190,6 +222,8 @@ def test_runtime_uses_semantic_service_cards_without_role_data() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     app = APP_JS.read_text(encoding="utf-8")
     assert 'id="services-body" class="service-grid"' in html
+    assert 'id="model-list" class="model-list"' in html
+    assert html.count('class="inference-section"') == 1
     assert not re.search(r"<(?:table|thead|tbody|th|td)\b", html)
     assert 'create("article", "service-card")' in app
     assert '"System"' in app and '"HTTP"' in app
@@ -198,16 +232,118 @@ def test_runtime_uses_semantic_service_cards_without_role_data() -> None:
     assert "function cell(" not in app
 
 
+def test_inactive_unit_health_skip_reason_is_hidden_for_both_card_types() -> None:
+    """Suppress only the inactive-unit probe reason on model/service cards."""
+    app = APP_JS.read_text(encoding="utf-8")
+    assert 'function appendHealthDetail(container, reason)' in app
+    assert 'typeof reason !== "string" || !reason.trim() ||' in app
+    assert 'reason.trim().toLowerCase() === "health check skipped while unit is not active"' in app
+    assert "appendHealthDetail(httpStatus, observed.reason);" in app
+    assert "if (observed) appendHealthDetail(http, observed.reason);" in app
+    assert (
+        'append(create("span", "health-copy", '
+        'safeReason(reason, "Health detail unavailable")))' in app
+    )
+
+
+def test_model_runtime_and_meta_share_one_separator() -> None:
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    runtime = re.search(r"\.model-runtime\s*\{(?P<body>[^}]*)\}", css, re.DOTALL)
+    meta = re.search(r"\.model-meta\s*\{(?P<body>[^}]*)\}", css, re.DOTALL)
+    assert runtime and "border-bottom: 1px solid var(--line-soft)" in runtime.group("body")
+    assert meta and "border-bottom: 1px solid var(--line-soft)" in meta.group("body")
+    assert "border-top" not in meta.group("body")
+
+
 def test_runtime_grid_and_telemetry_are_compact_and_responsive() -> None:
     """Wide runtime is four columns and telemetry shares the GPU card height."""
     css = STYLE_CSS.read_text(encoding="utf-8")
-    assert re.search(
-        r"\.service-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)",
-        css,
-        re.DOTALL,
-    )
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
-    assert "grid-template-columns: minmax(0, 1fr);" in css
+    assert "grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));" in css
     assert re.search(r"\.metric-card\s*\{[^}]*min-height:\s*10\.5rem", css, re.DOTALL)
     assert ".gpu-card { min-height: 10.5rem; }" in css
     assert not re.search(r"(?:table|thead|tbody|\bth\b|\btd\b)", css)
+
+
+def test_restart_button_exists_only_on_comfyui_card() -> None:
+    """Restart is created (and appended) only under the isComfy guard."""
+    app = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(app, "function serviceControls(", "function activeHealthyModel(")
+    assert 'const restart = isComfy ? create("button", "quiet-button", "Restart") : null;' in body
+    # Auto/On/Off stay unchanged for every service card.
+    assert 'const auto = isComfy ? create("button", "quiet-button", "Auto") : null;' in body
+    assert 'controls.append(auto, on, off);' in body
+    # The restart button is only appended when it exists (ComfyUI card only).
+    assert "if (restart) {" in body
+    assert "controls.append(restart);" in body
+    assert body.index("if (restart) {") < body.index("controls.append(restart);")
+    # No Restart button can be created outside the ComfyUI guard: the literal
+    # label appears exactly once in the whole script.
+    assert app.count('"Restart"') == 1
+
+
+def test_restart_enabled_only_when_exactly_active_and_idle() -> None:
+    """Restart is disabled while busy or when ComfyUI is not exactly active."""
+    app = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(app, "function serviceControls(", "function activeHealthyModel(")
+    assert "restart.disabled = busy || observed.state !== \"active\";" in body
+    # It is an action button, not an aria-pressed mode toggle.
+    toggle_loop = body.index(
+        '[auto, on, off].forEach((button) => button.setAttribute("aria-pressed", "false"));'
+    )
+    pressed = body.index('selected.setAttribute("aria-pressed", "true");')
+    assert "restart" not in body[toggle_loop:pressed]
+
+
+def test_restart_action_uses_dedicated_endpoint_and_busy_guard() -> None:
+    """restartComfyUI posts to the dedicated endpoint through submitMutation."""
+    app = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(app, "async function restartComfyUI(", "async function submitMutation(")
+    lines = [line.strip() for line in body.splitlines()]
+    assert lines[1] == "if (mutationBusy()) return;"
+    assert 'await submitMutation("/api/services/comfyui/restart", "POST", {});' in body
+    assert "state.submittingMutation = true;" in body
+    # Live-region announcement for assistive tech, same pattern as model switch.
+    assert 'el.liveRegion.textContent = "ComfyUI restart submitted.";' in body
+
+
+def test_local_timer_starts_at_zero_counts_from_client_and_freezes() -> None:
+    """Locally submitted operations display from a fresh client baseline."""
+    app = APP_JS.read_text(encoding="utf-8")
+    # Explicit display-timing state exists and is reset per operation.
+    assert 'operationTimingMode: "resumed",' in app
+    assert "function resetOperationTiming() {" in app
+    body = _function_body(
+        app, "function beginOperationPolling(", "async function pollOperation("
+    )
+    assert "resetOperationTiming();" in body
+    assert 'state.operationTimingMode = "local";' in body
+    assert "state.operationTimingBaseline = Date.now();" in body
+    assert "options.localDisplay" in body
+    # Only a locally accepted mutation switches to local mode; 409 following is
+    # explicitly resumed mode (backend timestamps).
+    submit = _function_body(
+        app, "async function submitMutation(", "function beginOperationPolling("
+    )
+    assert "{ localDisplay: true }" in submit
+    assert "{ localDisplay: false }" in submit
+    # Status discovery (outside submitMutation) never passes localDisplay.
+    discovery = _function_body(app, "async function refreshStatus(", "function renderStatus(")
+    assert "localDisplay" not in discovery
+
+    clock = _function_body(app, "function updateElapsed(", "function dismissOperation(")
+    assert 'state.operationTimingMode === "local"' in clock
+    assert "state.operationTimingFrozenAt = Date.now();" in clock
+    assert "formatClock(frozen)" in clock
+    assert "formatClock(running)" in clock
+    # Resumed mode keeps using the backend timestamps.
+    assert "Date.parse(operation.started_at || operation.created_at)" in clock
+    assert "operation.finished_at ? Date.parse(operation.finished_at)" in clock
+
+
+def test_timing_state_resets_on_dismiss_and_lock() -> None:
+    """Dismiss and lock clear the display timing so baselines never leak."""
+    app = APP_JS.read_text(encoding="utf-8")
+    dismiss = _function_body(app, "function dismissOperation()", "function showOperationOverlay(")
+    assert "resetOperationTiming();" in dismiss
+    lock = _function_body(app, "function lockConsole()", "function handleUnauthorized(")
+    assert "resetOperationTiming();" in lock

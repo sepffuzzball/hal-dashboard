@@ -3,6 +3,12 @@
 # the unit fails closed until you review it. Copy to
 # /etc/systemd/system/comfyui.service and fill in your real paths. The polkit
 # rule must list the same unit name.
+#
+# Model storage: this unit pins ComfyUI to physical GPU 1 via
+# CUDA_VISIBLE_DEVICES=1. Model discovery is driven by a separate
+# extra_model_paths.yaml (see deploy/comfyui/extra_model_paths.yaml.example)
+# whose base_path scopes ALL categories to /home/hal/models/comfyui, so the
+# LLM safetensors that live directly under /home/hal/models are never scanned.
 
 [Unit]
 Description=ComfyUI (GPU 1, image generation)
@@ -18,9 +24,15 @@ Environment=CUDA_VISIBLE_DEVICES=1
 
 # PLACEHOLDER (impossible on purpose): replace __COMFY_VENV__ with your real
 # ComfyUI virtualenv. Keep the port aligned with the health_url configured for
-# the 'comfyui' service in config/systems.toml (default 8188). ComfyUI should
-# stay bound to the loopback interface unless you put it behind TLS.
-ExecStart=__COMFY_VENV__/bin/python main.py --listen 127.0.0.1 --port 8188
+# the 'comfyui' service in config/systems.toml (default 8188). It is bound to
+# 0.0.0.0 so a reverse proxy can serve it; ComfyUI itself has no dashboard auth,
+# so restrict port 8188 to the reverse-proxy/firewall clients only.
+#
+# --enable-manager turns on ComfyUI Manager (node/graph installation and
+# updates from the ComfyUI UI and its /manager endpoints). Those endpoints can
+# install/update code on this machine, so port 8188 MUST stay restricted to the
+# reverse proxy/firewall clients - never expose it to an untrusted network.
+ExecStart=__COMFY_VENV__/bin/python main.py --listen 0.0.0.0 --port 8188 --enable-manager
 
 Restart=on-failure
 RestartSec=5

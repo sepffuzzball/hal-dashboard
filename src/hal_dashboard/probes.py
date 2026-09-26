@@ -27,6 +27,12 @@ __all__ = ["HealthChecker", "Probes", "Systemctl", "resolve_binary"]
 TRUSTED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 UNIT_STATES = frozenset({"active", "inactive", "activating", "deactivating", "failed", "unknown"})
 
+# HTTP statuses that a gateway/backend can legitimately return while still
+# finishing startup (SGLang behind its health endpoint). Treating these as a
+# permanent failure caused a premature rollback/SIGKILL, so they are classed as
+# transient not-ready (None) to keep the caller polling until its deadline.
+_TRANSIENT_HTTP_STATUSES = frozenset({502, 503, 504})
+
 _NVIDIA_QUERY = "index,name,utilization.gpu,memory.used,memory.total,temperature.gpu"
 
 
@@ -114,10 +120,17 @@ class HealthChecker:
             request = urllib.request.Request(url, method="GET")  # noqa: S310 - scheme validated at config load
             with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
                 return 200 <= response.status < 400
-        except urllib.error.HTTPError:
-            # The endpoint answered: the service is reachable but unhealthy.
-            # urllib raises HTTPError (a URLError subclass) for non-success
-            # statuses, so this clause must stay ahead of the URLError one.
+        except urllib.error.HTTPError as exc:
+            # The endpoint answered, so the host is reachable; only the status
+            # code tells us whether it is actually ready. 502/503/504 can be
+            # emitted while a backend is still finishing startup, so those are
+            # transient not-ready (None) - the caller keeps polling up to its
+            # deadline instead of failing the operation. Every other non-success
+            # status is a real failure (False). urllib raises HTTPError (a
+            # URLError subclass) for non-success statuses, so this clause must
+            # stay ahead of the URLError one.
+            if exc.code in _TRANSIENT_HTTP_STATUSES:
+                return None
             return False
         except (urllib.error.URLError, OSError, ValueError):
             return None

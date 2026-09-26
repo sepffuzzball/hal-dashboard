@@ -40,12 +40,14 @@ from hal_dashboard.auth import (
 from hal_dashboard.config import load_config
 from hal_dashboard.operations import (
     COMPANION_SERVICE_ID,
+    SERVICE_RESTART_STEPS,
     SERVICE_TOGGLE_STEPS,
     SWITCH_STEPS,
     AppContext,
     BusyError,
     Operation,
     OperationManager,
+    run_service_restart,
     run_service_toggle,
     run_switch,
 )
@@ -230,6 +232,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     "GET /api/status",
                     "POST /api/switch",
                     "PUT /api/services/{service_id}",
+                    "POST /api/services/comfyui/restart",
                     "GET /api/operations/{operation_id}",
                 ],
                 "auth_header": TOKEN_HEADER,
@@ -380,6 +383,31 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 {"service_id": service.id, "active": body.active},
                 SERVICE_TOGGLE_STEPS,
                 lambda op: run_service_toggle(ctx, op),
+            )
+        except BusyError as exc:
+            return _busy_response(exc)
+        return _accepted(operation)
+
+    @app.post("/api/services/comfyui/restart")
+    async def restart_comfyui() -> JSONResponse:
+        """Restart ComfyUI only: a fixed stop-then-start operation.
+
+        There is deliberately no generic model/service restart endpoint: this
+        route exists solely for the companion service, and the runner
+        re-validates all safety states after its snapshot under the
+        single-flight lock (this closes dashboard-side races; direct external
+        systemctl callers are outside the lock and are bounded by the
+        verified stop/start steps).
+        """
+        service = config.service_by_id(COMPANION_SERVICE_ID)
+        if service is None:  # not configured in this deployment: fail closed
+            return _json_error(404, "comfyui service is not configured")
+        try:
+            operation = ctx.manager.submit(
+                "service-restart",
+                {"service_id": service.id},
+                SERVICE_RESTART_STEPS,
+                lambda op: run_service_restart(ctx, op),
             )
         except BusyError as exc:
             return _busy_response(exc)

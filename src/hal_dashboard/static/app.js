@@ -1,6 +1,6 @@
 "use strict";
 
-const BUILD_ID = "20260924-4";
+const BUILD_ID = "20260926-3";
 const TOKEN_KEY = "hal-dashboard-token";
 const MIN_REFRESH_SECONDS = 5;
 const MAX_REFRESH_SECONDS = 300;
@@ -12,6 +12,8 @@ const STEP_LABELS = {
   "start-model": "Start selected model",
   "companion-service": "Apply ComfyUI policy",
   "apply-state": "Apply requested state",
+  "stop-service": "Stop ComfyUI service",
+  "start-service": "Start ComfyUI service",
 };
 
 const state = {
@@ -30,6 +32,17 @@ const state = {
   elapsedTimer: null,
   operation: null,
   operationUrl: null,
+  // Client display timing for the operation overlay. A mutation submitted by
+  // this page renders in "local" mode: the clock starts at 00:00 from a fresh
+  // Date.now() baseline (backend created/started/finished timestamps stay
+  // authoritative but are not used for the visible count) and freezes when the
+  // operation turns terminal. Following an operation discovered elsewhere (409
+  // or /api/status) uses "resumed" mode with backend timestamps. The fields are
+  // reset for every new operation and when the overlay is dismissed/locked, so
+  // one operation's baseline can never leak into another.
+  operationTimingMode: "resumed",
+  operationTimingBaseline: null,
+  operationTimingFrozenAt: null,
   operationFocusReturn: null,
   operationFocusSet: false,
   comfyControlMode: "auto",
@@ -352,10 +365,7 @@ function renderServices(itemsOverride = null) {
   const statusItems = itemsOverride || (state.status && state.status.services && state.status.services.items) || [];
   const byId = new Map(statusItems.map((item) => [item.id, item]));
   replaceChildren(el.servicesBody);
-  const configured = [
-    ...state.config.models.map((item) => ({ ...item, kind: "model" })),
-    ...state.config.services.map((item) => ({ ...item, kind: "service" })),
-  ];
+  const configured = state.config.services.map((item) => ({ ...item, kind: "service" }));
   configured.forEach((spec) => {
     const observed = byId.get(spec.id) || { id: spec.id, display_name: spec.display_name, kind: spec.kind, state: "unknown", healthy: null, reason: "Status unavailable" };
     const card = create("article", "service-card");
@@ -368,7 +378,7 @@ function renderServices(itemsOverride = null) {
     const httpStatus = create("div", "service-status");
     const health = observed.healthy === true ? ["Healthy", "healthy"] : observed.healthy === false ? ["Unhealthy", "unhealthy"] : ["Not verified", "unchecked"];
     httpStatus.append(create("p", "service-field-label", "HTTP"), statusBadge(health[0], health[1]));
-    if (observed.reason) httpStatus.append(create("span", "health-copy", safeReason(observed.reason, "Health detail unavailable")));
+    appendHealthDetail(httpStatus, observed.reason);
     statuses.append(systemStatus, httpStatus);
     const control = create("div", "service-control-area");
     control.append(create("p", "service-field-label", "Control"));
@@ -386,6 +396,10 @@ function serviceControls(spec, observed) {
   const auto = isComfy ? create("button", "quiet-button", "Auto") : null;
   const on = create("button", "quiet-button", "On");
   const off = create("button", "quiet-button", "Off");
+  // Restart exists only on the ComfyUI card and is not a mode toggle: it is a
+  // verified stop+start operation, offered exclusively while ComfyUI is
+  // observed exactly active and no mutation is busy.
+  const restart = isComfy ? create("button", "quiet-button", "Restart") : null;
   if (auto) auto.type = "button";
   on.type = off.type = "button";
   const conflict = activeConflictForService(spec);
@@ -407,6 +421,13 @@ function serviceControls(spec, observed) {
     off.addEventListener("click", () => setService(spec.id, false));
     controls.append(on, off);
   }
+  if (restart) {
+    restart.type = "button";
+    restart.disabled = busy || observed.state !== "active";
+    restart.setAttribute("aria-label", "Restart ComfyUI (verified stop and start)");
+    restart.addEventListener("click", () => restartComfyUI());
+    controls.append(restart);
+  }
   wrapper.append(controls);
   let reason = "Choose an explicit desired state.";
   if (isComfy && state.comfyControlMode === "auto") {
@@ -421,6 +442,9 @@ function serviceControls(spec, observed) {
   else if (!isComfy && (observed.state === "inactive" || observed.state === "failed")) reason = "Already not running; only On is available.";
   else if (isComfy) reason = `${titleCase(state.comfyControlMode)} is selected. Auto follows the active inference system.`;
   else if (indeterminate) reason = "Control unavailable until a stable state can be observed.";
+  if (isComfy && !busy && observed.state !== "active") {
+    reason += " Restart is available only while ComfyUI is active.";
+  }
   wrapper.append(create("span", "control-reason", reason));
   return wrapper;
 }
@@ -495,14 +519,26 @@ function renderModels() {
     if (loading) top.append(statusBadge("Loading", "loading"));
     else if (active) top.append(statusBadge("Active", "active"));
     else if (starting) top.append(statusBadge(observed.state === "active" ? "Health pending" : "Starting", "starting"));
-    card.append(top, create("h3", null, model.display_name), create("p", "model-synopsis", model.synopsis));
+    card.append(top, create("h3", null, model.display_name));
+    const observedState = observed ? observed.state : "unknown";
+    const runtime = create("div", "model-runtime");
+    const system = create("div", "service-status");
+    system.append(create("p", "service-field-label", "System"), statusBadge(observedState));
+    const http = create("div", "service-status");
+    const health = !observed || observed.healthy === null || observed.healthy === undefined
+      ? ["Not verified", "unchecked"]
+      : observed.healthy ? ["Healthy", "healthy"] : ["Unhealthy", "unhealthy"];
+    http.append(create("p", "service-field-label", "HTTP"), statusBadge(health[0], health[1]));
+    if (observed) appendHealthDetail(http, observed.reason);
+    runtime.append(system, http);
+    card.append(runtime);
     const meta = create("dl", "model-meta");
     meta.append(metaItem("GPU allocation", formatGpuAllocation(model.gpus)), metaItem("Load window", formatLoadWindow(model)));
     card.append(meta);
     const strengths = create("ul", "strength-list");
     const entries = Array.isArray(model.strengths) && model.strengths.length ? model.strengths : ["General workloads"];
     entries.forEach((strength) => strengths.append(create("li", null, strength)));
-    card.append(strengths);
+    card.append(strengths, create("span", "model-action", "Select to switch"));
     card.addEventListener("click", () => activateModel(model));
     card.addEventListener("keydown", (event) => handleModelKey(event, model.id));
     el.modelList.append(card);
@@ -576,13 +612,26 @@ async function setService(serviceId, active, comfyMode = null) {
   await submitMutation(`/api/services/${encodeURIComponent(serviceId)}`, "PUT", { active });
 }
 
+// ComfyUI-only restart: dedicated endpoint, single-flight operation, and a
+// verified stop/start on the backend. Shares the global busy handling and the
+// overlay/accessibility behavior of every other mutation.
+async function restartComfyUI() {
+  if (mutationBusy()) return;
+  state.submittingMutation = true;
+  el.liveRegion.textContent = "ComfyUI restart submitted.";
+  renderServices();
+  renderModels();
+  await submitMutation("/api/services/comfyui/restart", "POST", {});
+}
+
 async function submitMutation(url, method, body, targetModelId = null) {
   setMutationsDisabled(true);
   try {
     const response = await api(url, { method, body: JSON.stringify(body) });
     state.submittingModelId = null;
     state.submittingMutation = false;
-    beginOperationPolling(response.status_url, response.target_model_id || targetModelId);
+    // Locally submitted operations display in local mode (00:00 up-count).
+    beginOperationPolling(response.status_url, response.target_model_id || targetModelId, { localDisplay: true });
   } catch (error) {
     state.submittingModelId = null;
     state.submittingMutation = false;
@@ -592,7 +641,8 @@ async function submitMutation(url, method, body, targetModelId = null) {
     }
     if (error.status === 409 && error.payload && error.payload.status_url) {
       showNotice("Another operation is active. Following its progress instead.", false);
-      beginOperationPolling(error.payload.status_url, error.payload.target_model_id);
+      // Following someone else's operation: resumed mode, backend timestamps.
+      beginOperationPolling(error.payload.status_url, error.payload.target_model_id, { localDisplay: false });
       return;
     }
     const conflicts = error.payload && Array.isArray(error.payload.conflicts_with)
@@ -603,13 +653,20 @@ async function submitMutation(url, method, body, targetModelId = null) {
   }
 }
 
-function beginOperationPolling(statusUrl, targetModelId = null) {
+function beginOperationPolling(statusUrl, targetModelId = null, options = {}) {
   if (!isLocalOperationUrl(statusUrl)) {
     showNotice("The operation response could not be followed safely.", true);
     setMutationsDisabled(false);
     return;
   }
   clearTimeout(state.operationTimer);
+  // Every new operation gets a fresh display-timing baseline; nothing from a
+  // previous operation leaks into this one.
+  resetOperationTiming();
+  if (options.localDisplay) {
+    state.operationTimingMode = "local";
+    state.operationTimingBaseline = Date.now();
+  }
   state.operationUrl = statusUrl;
   state.operation = { status: "queued", steps: [], created_at: new Date().toISOString(), target_model_id: targetModelId };
   renderOperation();
@@ -689,9 +746,34 @@ function startElapsedClock() {
   }
 }
 
+// Reset the client-side display timing entirely. Called for every new
+// operation and whenever the overlay is dismissed or the console is locked,
+// so a stale baseline can never leak into another operation's clock.
+function resetOperationTiming() {
+  state.operationTimingMode = "resumed";
+  state.operationTimingBaseline = null;
+  state.operationTimingFrozenAt = null;
+}
+
 function updateElapsed() {
   const operation = state.operation;
   if (!operation) return;
+  if (state.operationTimingMode === "local" && Number.isFinite(state.operationTimingBaseline)) {
+    // Locally submitted operation: count from the moment this page started
+    // following it (first render is exactly 00:00) and freeze the client
+    // elapsed value once the operation reaches a terminal state.
+    if (TERMINAL_STATES.has(operation.status)) {
+      if (state.operationTimingFrozenAt === null) state.operationTimingFrozenAt = Date.now();
+      const frozen = Math.max(0, Math.floor((state.operationTimingFrozenAt - state.operationTimingBaseline) / 1000));
+      el.operationElapsed.textContent = formatClock(frozen);
+      return;
+    }
+    const running = Math.max(0, Math.floor((Date.now() - state.operationTimingBaseline) / 1000));
+    el.operationElapsed.textContent = formatClock(running);
+    return;
+  }
+  // Resumed operation (409 follow or /api/status discovery): use the backend
+  // timestamps, which remain the authoritative elapsed source.
   const start = Date.parse(operation.started_at || operation.created_at);
   const end = operation.finished_at ? Date.parse(operation.finished_at) : Date.now();
   if (!Number.isFinite(start)) {
@@ -699,7 +781,11 @@ function updateElapsed() {
     return;
   }
   const seconds = Math.max(0, Math.floor((end - start) / 1000));
-  el.operationElapsed.textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  el.operationElapsed.textContent = formatClock(seconds);
+}
+
+function formatClock(seconds) {
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function dismissOperation() {
@@ -707,6 +793,7 @@ function dismissOperation() {
   state.operation = null;
   hideOperationOverlay(true);
   clearInterval(state.elapsedTimer);
+  resetOperationTiming();
 }
 
 function showOperationOverlay() {
@@ -841,6 +928,7 @@ function lockConsole() {
   clearInterval(state.elapsedTimer);
   state.operationUrl = null;
   state.operation = null;
+  resetOperationTiming();
   el.main.hidden = true;
   el.lockButton.hidden = true;
   hideOperationOverlay(false);
@@ -930,6 +1018,11 @@ function isLocalOperationUrl(value) {
 
 function safeReason(value, fallback) {
   return typeof value === "string" && value.length <= 300 ? value : fallback;
+}
+
+function appendHealthDetail(container, reason) {
+  if (typeof reason !== "string" || !reason.trim() || reason.trim().toLowerCase() === "health check skipped while unit is not active") return;
+  container.append(create("span", "health-copy", safeReason(reason, "Health detail unavailable")));
 }
 
 function safeText(value, fallback) {

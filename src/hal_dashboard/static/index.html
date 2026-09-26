@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#10100f">
-  <meta name="hal-dashboard-build" content="20260924-4">
+  <meta name="hal-dashboard-build" content="20260926-3">
   <title>HAL Operations Console</title>
-  <link rel="icon" href="/favicon.svg?v=20260924-4" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=20260924-4">
-  <script src="/app.js?v=20260924-4" defer></script>
+  <link rel="icon" href="/favicon.svg?v=20260926-3" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=20260926-3">
+  <script src="/app.js?v=20260926-3" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to dashboard</a>
@@ -79,28 +79,22 @@
       <button id="dismiss-operation" class="quiet-button" type="button" hidden>Dismiss operation</button>
     </section>
 
-    <section class="services-section" aria-labelledby="services-heading">
+    <section class="inference-section" aria-labelledby="inference-heading">
       <div class="section-heading">
         <div>
-          <p class="section-index">02 / Runtime</p>
-          <h2 id="services-heading" class="sr-only">Service health</h2>
+          <p class="section-index">02 / Inference &amp; services</p>
+          <h2 id="inference-heading">Inference &amp; services</h2>
         </div>
-        <p class="section-note">Observed states, not requested states</p>
+        <p class="section-note">Observed system state and HTTP health determine readiness.</p>
       </div>
       <div id="conflict-warning" class="warning-block" role="alert" hidden></div>
-      <div id="services-body" class="service-grid"></div>
-    </section>
-
-    <section class="models-section" aria-labelledby="models-heading">
-      <div class="section-heading">
-        <div>
-          <p class="section-index">03 / Model routing</p>
-          <h2 id="models-heading" class="sr-only">Switch inference system</h2>
-        </div>
-        <p class="section-note">Observed state determines when a system is active</p>
-      </div>
-      <p id="model-help" class="model-help">Activate a system to switch immediately. Use arrow keys to move between systems.</p>
+      <p id="model-help" class="model-help">Activate a model to switch immediately. Use arrow keys to move between models. States shown are observed, not requested.</p>
       <div id="model-list" class="model-list" aria-describedby="model-help"></div>
+      <div class="auxiliary-heading">
+        <h3>Auxiliary services</h3>
+        <span>Companion processes and policy controls</span>
+      </div>
+      <div id="services-body" class="service-grid"></div>
     </section>
   </main>
 

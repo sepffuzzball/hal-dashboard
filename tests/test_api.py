@@ -51,6 +51,7 @@ def test_protected_routes_require_token(anon_client: TestClient) -> None:
         assert anon_client.get(path).status_code == 401
     assert anon_client.post("/api/switch", json={"model_id": "x"}).status_code == 401
     assert anon_client.put("/api/services/comfyui", json={"active": True}).status_code == 401
+    assert anon_client.post("/api/services/comfyui/restart").status_code == 401
 
 
 def test_wrong_token_is_rejected(client: TestClient) -> None:
@@ -121,12 +122,14 @@ def test_only_health_and_auth_mode_are_public(anon_client: TestClient) -> None:
         assert anon_client.get(path).status_code == 401
     assert anon_client.post("/api/switch", json={"model_id": "x"}).status_code == 401
     assert anon_client.put("/api/services/comfyui", json={"active": True}).status_code == 401
+    assert anon_client.post("/api/services/comfyui/restart").status_code == 401
 
 
 def test_default_auth_mode_capabilities(client: TestClient) -> None:
     caps = client.get("/api/config").json()["capabilities"]
     assert caps["token_required"] is True
     assert "GET /api/auth-mode" in caps["endpoints"]
+    assert "POST /api/services/comfyui/restart" in caps["endpoints"]
 
 
 @pytest.mark.parametrize(
@@ -310,8 +313,8 @@ def test_config_payload_is_sanitized(client: TestClient) -> None:
     assert vllm["gpus"] == [0, 1]
     assert vllm["allow_comfyui_override"] is False
     assert vllm["comfyui_default"] is False
-    assert vllm["startup_eta_min_seconds"] == 300
-    assert vllm["startup_eta_seconds"] == 420
+    assert vllm["startup_eta_min_seconds"] == 240
+    assert vllm["startup_eta_seconds"] == 360
     assert any(s["id"] == "comfyui" for s in payload["services"])
 
 
@@ -636,9 +639,9 @@ def test_static_frontend_is_packaged_and_served(client: TestClient) -> None:
     index = client.get("/")
     assert index.status_code == 200
     assert "text/html" in index.headers["content-type"]
-    # The direct-switch model-routing section is the shipped interface marker.
+    # The combined inference/service section is the shipped interface marker.
     assert 'id="model-list"' in index.text
-    assert "Switch inference system" in index.text
+    assert "Inference &amp; services" in index.text
     app_js = client.get("/app.js")
     assert app_js.status_code == 200
     assert "hal-dashboard-token" in app_js.text
@@ -664,7 +667,7 @@ def test_favicon_is_packaged_and_served(client: TestClient) -> None:
     favicon_path = static_dir / "favicon.svg"
     assert favicon_path.is_file()
 
-    response = client.get("/favicon.svg?v=20260924-4")
+    response = client.get("/favicon.svg?v=20260926-3")
     assert response.status_code == 200
     assert "image/svg+xml" in response.headers["content-type"]
     body = response.text
@@ -679,9 +682,9 @@ def test_frontend_responses_are_not_stored(client: TestClient) -> None:
         "/app.js",
         "/styles.css",
         "/favicon.svg",
-        "/app.js?v=20260924-4",
-        "/styles.css?v=20260924-4",
-        "/favicon.svg?v=20260924-4",
+        "/app.js?v=20260926-3",
+        "/styles.css?v=20260926-3",
+        "/favicon.svg?v=20260926-3",
     ):
         response = client.get(path)
         assert response.status_code == 200
@@ -699,14 +702,14 @@ def test_frontend_responses_are_not_stored(client: TestClient) -> None:
 
     # The served HTML references versioned asset URLs and a build marker.
     index = client.get("/")
-    assert 'href="/favicon.svg?v=20260924-4"' in index.text
-    assert 'href="/styles.css?v=20260924-4"' in index.text
-    assert 'src="/app.js?v=20260924-4"' in index.text
-    assert '<meta name="hal-dashboard-build" content="20260924-4">' in index.text
+    assert 'href="/favicon.svg?v=20260926-3"' in index.text
+    assert 'href="/styles.css?v=20260926-3"' in index.text
+    assert 'src="/app.js?v=20260926-3"' in index.text
+    assert '<meta name="hal-dashboard-build" content="20260926-3">' in index.text
 
     # The versioned app.js carries the build id and the guarded dismiss listener.
-    app_js = client.get("/app.js?v=20260924-4")
-    assert 'const BUILD_ID = "20260924-4";' in app_js.text
+    app_js = client.get("/app.js?v=20260926-3")
+    assert 'const BUILD_ID = "20260926-3";' in app_js.text
     assert "if (el.dismissOperation) el.dismissOperation.addEventListener(" in app_js.text
     assert "el.dismissOperation.addEventListener(" in app_js.text
 

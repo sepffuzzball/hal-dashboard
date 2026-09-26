@@ -4,6 +4,11 @@ Regression guard: urllib raises ``urllib.error.HTTPError`` (a ``URLError``
 subclass) for non-success responses. ``urllib.error.HTTPStatusError`` only
 exists in httpx-style APIs; referencing it made the probe crash with
 ``AttributeError`` while evaluating the except clause on Debian Python 3.13.
+
+The 502/503/504 gate is the transient-readiness guard: those statuses can be
+returned by a backend (e.g. SGLang) that is still finishing startup, so the
+probe reports them as not-ready (``None``) to keep the caller polling up to the
+readiness deadline rather than treating them as a permanent failure.
 """
 
 from __future__ import annotations
@@ -11,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import urllib.error
 import urllib.request
+
+import pytest
 
 from hal_dashboard.probes import HealthChecker
 
@@ -32,26 +39,26 @@ def _http_error(code: int) -> urllib.error.HTTPError:
     )
 
 
-def test_health_error_status_yields_false(monkeypatch) -> None:
-    """A configured endpoint replying 5xx must yield False, not raise."""
-
+def _check(monkeypatch, code: int) -> bool | None:
     def fake_urlopen(request, *args, **kwargs):  # noqa: ANN001, ARG001
-        raise _http_error(503)
+        raise _http_error(code)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    result = asyncio.run(HealthChecker(timeout_seconds=0.5).check("http://127.0.0.1:8188/health"))
-    assert result is False
+    return asyncio.run(
+        HealthChecker(timeout_seconds=0.5).check("http://127.0.0.1:8188/health")
+    )
 
 
-def test_health_client_error_status_yields_false(monkeypatch) -> None:
-    """4xx is an answer too: reachable but unhealthy -> False, not raise."""
+@pytest.mark.parametrize("code", [502, 503, 504])
+def test_health_transient_gateway_status_yields_none(monkeypatch, code: int) -> None:
+    """502/503/504 during startup is transient not-ready (None), not failure."""
+    assert _check(monkeypatch, code) is None
 
-    def fake_urlopen(request, *args, **kwargs):  # noqa: ANN001, ARG001
-        raise _http_error(404)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    result = asyncio.run(HealthChecker(timeout_seconds=0.5).check("http://127.0.0.1:8188/health"))
-    assert result is False
+@pytest.mark.parametrize("code", [404, 500])
+def test_health_non_transient_error_status_yields_false(monkeypatch, code: int) -> None:
+    """4xx and non-gateway 5xx are a real answer: reachable but unhealthy."""
+    assert _check(monkeypatch, code) is False
 
 
 def test_health_success_status_yields_true(monkeypatch) -> None:

@@ -60,7 +60,7 @@ default_refresh_seconds = 60
 
 # The three model backends are mutually exclusive and share one external LLM
 # identity: exactly one backend is running at a time, bound to
-# 127.0.0.1:8000 and serving the model name 'hal-current', so external LLM
+# 127.0.0.1:8000 and serving the model name 'hal', so external LLM
 # clients keep a fixed base URL and model name across switches (no proxy).
 
 [[model]]
@@ -68,9 +68,9 @@ id = "vllm-dsv4-flash-vision"
 display_name = "vLLM DSv4 Flash Vision Exp"
 unit = "vllm-deepseek-v4.service"
 gpus = [0, 1]
-startup_eta_min_seconds = 300
-startup_eta_seconds = 420
-startup_timeout_seconds = 900
+startup_eta_min_seconds = 240
+startup_eta_seconds = 360
+startup_timeout_seconds = 1800
 synopsis = "Creative writing and agentic tasks with high parallelism (lots of agents), spanning both GPUs."
 strengths = [
     "creative writing",
@@ -87,9 +87,9 @@ id = "sglang-qwen38-flash-next"
 display_name = "SGLang Qwen3.8 Flash Next"
 unit = "sglang-qwen38-flash-next.service"
 gpus = [0]
-startup_eta_min_seconds = 180
-startup_eta_seconds = 360
-startup_timeout_seconds = 900
+startup_eta_min_seconds = 480
+startup_eta_seconds = 600
+startup_timeout_seconds = 1800
 synopsis = "Creative writing and basic agentic tasks on one GPU; ComfyUI stays available on GPU 1."
 strengths = [
     "creative writing",
@@ -108,9 +108,9 @@ unit = "sglang-qwen38-27b.service"
 # Tensor-parallel 2 (gpus = [0, 1]) can be configured here if the SGLang unit
 # is started with --tensor-parallel-size 2.
 gpus = [0]
-startup_eta_min_seconds = 120
-startup_eta_seconds = 180
-startup_timeout_seconds = 900
+startup_eta_min_seconds = 180
+startup_eta_seconds = 300
+startup_timeout_seconds = 1800
 synopsis = "Agentic tasks; very fast for lots of small tasks. One GPU by default; ComfyUI remains usable for basic tasks."
 strengths = [
     "agentic tasks",

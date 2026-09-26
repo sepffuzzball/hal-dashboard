@@ -1,0 +1,52 @@
+# Deployable example for the isolated ComfyUI model store on host "hal".
+#
+# ComfyUI loads this file automatically from <ComfyUI>/extra_model_paths.yaml
+# (see main.py: utils.extra_config.load_extra_path_config). Copy it there:
+#
+#   cp deploy/comfyui/extra_model_paths.yaml.example \
+#      /home/hal/Apps/comfy/ComfyUI/extra_model_paths.yaml
+#   chown hal:hal /home/hal/Apps/comfy/ComfyUI/extra_model_paths.yaml
+#   chmod 0644 /home/hal/Apps/comfy/ComfyUI/extra_model_paths.yaml
+#
+# Isolation rules this file enforces:
+#   * Every category resolves UNDER /home/hal/models/comfyui (base_path).
+#   * The /home/hal/models root is never scanned, so the LLM safetensors that
+#     live directly under it (Qwen3.8-*, DeepSeek-V4-*) are not indexed by
+#     ComfyUI. All category paths are relative to base_path only.
+#   * Category paths are relative to base_path (parser joins them), so no entry
+#     references the parent /home/hal/models directory.
+#   * ComfyUI's built-in models dir, input/output/user and custom_nodes are left
+#     untouched; extra paths are appended, not replacing them.
+#
+# Syntax is validated against the installed ComfyUI 0.37.0 parser
+# (utils/extra_config.py): a category may be a single line or a block scalar
+# ("|") listing multiple folders, one per line.
+
+hal-models:
+    base_path: /home/hal/models/comfyui
+
+    # Single-folder categories.
+    checkpoints: checkpoints
+    clip_vision: clip_vision
+    loras: loras
+    vae: vae
+    vae_approx: vae_approx
+    embeddings: embeddings
+    diffusers: diffusers
+    style_models: style_models
+    model_patches: model_patches
+    audio_encoders: audio_encoders
+    latent_upscale_models: latent_upscale_models
+    upscale_models: upscale_models
+
+    # Multi-folder categories (block scalar): map a canonical ComfyUI category
+    # onto the matching canonical subdirectory plus its legacy alias.
+    diffusion_models: |
+        diffusion_models
+        unet
+    text_encoders: |
+        text_encoders
+        clip
+    controlnet: |
+        controlnet
+        t2i_adapter

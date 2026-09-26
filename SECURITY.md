@@ -28,9 +28,13 @@ advisory with your permission.
 
 - **The dashboard controls systemd units.** A holder of the admin token can
   start/stop the configured LLM and ComfyUI services (via a least-privilege
-  polkit grant limited to those exact units and the `start`/`stop` verbs). A
-  token leak therefore means control of those services plus all status data -
-  there are no users or roles, only one shared token.
+  polkit grant limited to those exact units and the `start`/`stop` verbs). The
+  ComfyUI Restart feature (`POST /api/services/comfyui/restart`) does **not**
+  widen this grant: it is a ComfyUI-only operation that composes the same
+  `stop` and `start` verbs under the single-flight lock, and no generic
+  model/service restart capability exists. A token leak therefore means control
+  of those services plus all status data - there are no users or roles, only one
+  shared token.
 - **Redact tokens in logs and screenshots.** The admin token is sent in the
   `X-Hal-Token` header; proxy access logs, debug logs, and screenshots (this
   repository includes a UI preview) can leak it or reveal environment paths.
@@ -39,3 +43,8 @@ advisory with your permission.
 - The API enforces token authentication, exact-origin checks on mutations, and
   security headers, and it never executes shells or arbitrary units - but TLS is not terminated by the app itself, so keep it behind a reverse proxy when
   it is reachable beyond loopback.
+- **ComfyUI Manager is enabled** (`--enable-manager` in the ComfyUI unit). Its
+  UI/API endpoints can install and update code on the machine, and ComfyUI has
+  no dashboard authentication of its own, so port `8188` must stay restricted
+  to the reverse proxy/firewall clients - never expose it to an untrusted
+  network.
